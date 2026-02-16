@@ -1,0 +1,99 @@
+require('dotenv').config();
+const { REST, Routes, SlashCommandBuilder, PermissionFlagsBits } = require('discord.js');
+
+const token = process.env.DISCORD_TOKEN;
+const clientId = process.env.CLIENT_ID;
+const guildId = process.env.GUILD_ID;
+
+if (!token || !clientId || !guildId) {
+  console.error('Missing DISCORD_TOKEN or CLIENT_ID or GUILD_ID in .env');
+  process.exit(1);
+}
+
+const commands = [
+  new SlashCommandBuilder()
+    .setName('ping')
+    .setDescription('Health check'),
+
+  new SlashCommandBuilder()
+    .setName('signup')
+    .setDescription('Register for the league (Real name, Tekken tag, email, phone)'),
+
+  new SlashCommandBuilder()
+    .setName('mydata')
+    .setDescription('View the personal data you submitted (private)'),
+
+  new SlashCommandBuilder()
+    .setName('checkin')
+    .setDescription('Mark yourself available for today (counts toward 15/20)'),
+
+  new SlashCommandBuilder()
+    .setName('ready')
+    .setDescription('Enter matchmaking queue (you are free to play now)'),
+
+  new SlashCommandBuilder()
+    .setName('unready')
+    .setDescription('Leave matchmaking queue'),
+
+  new SlashCommandBuilder()
+    .setName('standings')
+    .setDescription('Show current league standings'),
+
+  new SlashCommandBuilder()
+    .setName('admin_generate_fixtures')
+    .setDescription('Admin: generate double round robin fixtures for all signed-up players')
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
+  new SlashCommandBuilder()
+    .setName('admin_reset_league')
+    .setDescription('Admin: reset fixtures + matches + results (dangerous)')
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
+  new SlashCommandBuilder()
+    .setName('admin_force_result')
+    .setDescription('Admin: force a match result (used for no-show/DQ/forfeit)')
+    .addIntegerOption(o => o
+      .setName('match_id')
+      .setDescription('Match ID')
+      .setRequired(true))
+    .addUserOption(o => o
+      .setName('winner')
+      .setDescription('Winner')
+      .setRequired(true))
+    .addStringOption(o => o
+      .setName('score')
+      .setDescription('Score from winner perspective')
+      .setRequired(true)
+      .addChoices(
+        { name: '3-0 (clean win)', value: '3-0' },
+        { name: '3-1', value: '3-1' },
+        { name: '3-2', value: '3-2' },
+      ))
+    .addBooleanOption(o => o
+      .setName('forfeit')
+      .setDescription('Set true for no-show/DQ/forfeit (loser gets 0 points)')
+      .setRequired(false))
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
+  new SlashCommandBuilder()
+    .setName('admin_void_match')
+    .setDescription('Admin: void a match (removes result and re-opens the fixture)')
+    .addIntegerOption(o => o
+      .setName('match_id')
+      .setDescription('Match ID')
+      .setRequired(true))
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+].map(c => c.toJSON());
+
+const rest = new REST({ version: '10' }).setToken(token);
+
+(async () => {
+  try {
+    console.log(`Deploying ${commands.length} commands to guild ${guildId}...`);
+    await rest.put(Routes.applicationGuildCommands(clientId, guildId), { body: commands });
+    console.log('Done.');
+  } catch (err) {
+    console.error(err);
+    process.exit(1);
+  }
+})();
