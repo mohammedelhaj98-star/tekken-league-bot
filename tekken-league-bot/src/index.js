@@ -1803,6 +1803,8 @@ ${buildTournamentSettingsMessage()}`,
           return;
         }
 
+        await interaction.deferReply({ ephemeral: true });
+
         const level = interaction.options.getString('level', true);
         const planned = `⚠️ Reset requested by ${interaction.user.tag} (${interaction.user.id}).
 ${level === 'checkins' ? 'About to reset check-ins session (today attendance + queue).' : level === 'everything' ? 'About to reset EVERYTHING (including signups).' : 'About to reset league state (players preserved).'}`;
@@ -1813,7 +1815,7 @@ ${level === 'checkins' ? 'About to reset check-ins session (today attendance + q
 
         await notifyAdminsAboutReset(interaction.guild, interaction.user, `✅ Reset completed by ${interaction.user.tag} (${interaction.user.id}).
 ${summary}`);
-        await interaction.reply({ content: summary, ephemeral: true });
+        await interaction.editReply({ content: summary });
         return;
       }
 
@@ -1822,6 +1824,8 @@ ${summary}`);
           await interaction.reply({ content: 'Admin only.', ephemeral: true });
           return;
         }
+
+        await interaction.deferReply({ ephemeral: true });
 
         const planned = `⚠️ Reset requested by ${interaction.user.tag} (${interaction.user.id}).
 About to reset league state (players preserved).`;
@@ -1832,7 +1836,7 @@ About to reset league state (players preserved).`;
 
         await notifyAdminsAboutReset(interaction.guild, interaction.user, `✅ Reset completed by ${interaction.user.tag} (${interaction.user.id}).
 ${summary}`);
-        await interaction.reply({ content: summary, ephemeral: true });
+        await interaction.editReply({ content: summary });
         return;
       }
 
