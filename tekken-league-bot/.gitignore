@@ -1,0 +1,10 @@
+node_modules/
+data/
+.env
+*.log
+.DS_Store
+
+# local deployment/debug artifacts
+*.bak
+*.pre_dedupe.bak
+fix-deploy-duplicates.js
