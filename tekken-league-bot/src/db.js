@@ -163,6 +163,37 @@ function initDb(db) {
     );
   `);
 
+  function ensureColumn(tableName, columnName, ddl) {
+    const cols = db.prepare(`PRAGMA table_info(${tableName})`).all();
+    const exists = cols.some(c => c.name === columnName);
+    if (!exists) db.exec(`ALTER TABLE ${tableName} ADD COLUMN ${ddl}`);
+  }
+
+  ensureColumn('leagues', 'max_players', 'max_players INTEGER NOT NULL DEFAULT 64');
+  ensureColumn('leagues', 'timeslot_count', 'timeslot_count INTEGER NOT NULL DEFAULT 4');
+  ensureColumn('leagues', 'timeslot_duration_minutes', 'timeslot_duration_minutes INTEGER NOT NULL DEFAULT 120');
+  ensureColumn('leagues', 'timeslot_starts', "timeslot_starts TEXT NOT NULL DEFAULT '18:00,20:00,22:00,00:00'");
+  ensureColumn('matches', 'guild_id', 'guild_id TEXT');
+  ensureColumn('matches', 'match_channel_id', 'match_channel_id TEXT');
+  ensureColumn('matches', 'match_message_id', 'match_message_id TEXT');
+  ensureColumn('admin_roles', 'guild_id', 'guild_id TEXT');
+
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_players_league_status ON players (league_id, status);
+    CREATE INDEX IF NOT EXISTS idx_attendance_league_date ON attendance (league_id, date);
+    CREATE INDEX IF NOT EXISTS idx_fixtures_league_status ON fixtures (league_id, status);
+    CREATE INDEX IF NOT EXISTS idx_fixtures_players_status ON fixtures (league_id, player_a_discord_id, player_b_discord_id, status);
+    CREATE INDEX IF NOT EXISTS idx_pending_matches_fixture ON pending_matches (fixture_id);
+    CREATE INDEX IF NOT EXISTS idx_matches_fixture_state ON matches (fixture_id, state);
+    CREATE INDEX IF NOT EXISTS idx_matches_players_state ON matches (league_id, player_a_discord_id, player_b_discord_id, state);
+    CREATE INDEX IF NOT EXISTS idx_matches_message ON matches (match_message_id);
+    CREATE INDEX IF NOT EXISTS idx_results_match_confirmed ON results (match_id, confirmed_at);
+    CREATE INDEX IF NOT EXISTS idx_match_reports_match ON match_reports (match_id);
+    CREATE INDEX IF NOT EXISTS idx_audit_action_ts ON audit_log (league_id, action_type, ts);
+    CREATE INDEX IF NOT EXISTS idx_admin_roles_league ON admin_roles (league_id);
+  `);
+
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_players_league_status ON players (league_id, status);
     CREATE INDEX IF NOT EXISTS idx_attendance_league_date ON attendance (league_id, date);
