@@ -40,12 +40,8 @@ const client = new Client({
   partials: [Partials.Message, Partials.Channel, Partials.Reaction],
 });
 
-function getConfiguredAdminRoleIds(guildId) {
-  return db.prepare(`
-    SELECT role_id FROM admin_roles
-    WHERE league_id = 1 AND (guild_id = ? OR guild_id IS NULL)
-    ORDER BY role_id ASC
-  `).all(String(guildId || '')).map(r => r.role_id);
+function getConfiguredAdminRoleIds() {
+  return db.prepare('SELECT role_id FROM admin_roles WHERE league_id = 1 ORDER BY role_id ASC').all().map(r => r.role_id);
 }
 
 function getInteractionRoleIds(interaction) {
@@ -64,7 +60,7 @@ function getInteractionRoleIds(interaction) {
 function isAdmin(interaction) {
   if (interaction.memberPermissions?.has(PermissionsBitField.Flags.Administrator)) return true;
 
-  const configured = getConfiguredAdminRoleIds(interaction.guildId);
+  const configured = getConfiguredAdminRoleIds();
   if (!configured.length) return false;
 
   const roleIds = getInteractionRoleIds(interaction);
@@ -103,90 +99,6 @@ function logAudit(actionType, actorDiscordId, payload = null) {
   `).run(actorDiscordId || null, actionType, payload ? JSON.stringify(payload) : null);
 }
 
-
-function getGuildSettings(guildId) {
-  const id = String(guildId || '');
-  let row = db.prepare('SELECT * FROM guild_settings WHERE guild_id = ?').get(id);
-  if (!row) {
-    db.prepare(`
-      INSERT INTO guild_settings (
-        guild_id,
-        results_channel_id,
-        tournament_name,
-        timezone
-      ) VALUES (?, ?, ?, 'Asia/Qatar')
-    `).run(id, MATCH_CHANNEL_ID || null, process.env.LEAGUE_NAME || 'Tekken League');
-    row = db.prepare('SELECT * FROM guild_settings WHERE guild_id = ?').get(id);
-  }
-  return row;
-}
-
-function updateGuildSetting(guildId, patch) {
-  const current = getGuildSettings(guildId);
-  const merged = { ...current, ...patch };
-  db.prepare(`
-    UPDATE guild_settings
-    SET
-      results_channel_id = ?,
-      admin_channel_id = ?,
-      standings_channel_id = ?,
-      match_format = ?,
-      allow_public_player_commands = ?,
-      tournament_name = ?,
-      timezone = ?,
-      cleanup_policy = ?,
-      cleanup_days = ?,
-      enable_diagnostics = ?,
-      updated_at = datetime('now')
-    WHERE guild_id = ?
-  `).run(
-    merged.results_channel_id || null,
-    merged.admin_channel_id || null,
-    merged.standings_channel_id || null,
-    merged.match_format || 'FT3',
-    merged.allow_public_player_commands ? 1 : 0,
-    merged.tournament_name || 'Tekken League',
-    merged.timezone || 'Asia/Qatar',
-    merged.cleanup_policy || 'keep',
-    merged.cleanup_days || null,
-    merged.enable_diagnostics ? 1 : 0,
-    String(guildId || ''),
-  );
-}
-
-function getScoreReactionsForFormat(format) {
-  return format === 'FT2' ? ['0️⃣', '1️⃣'] : ['0️⃣', '1️⃣', '2️⃣'];
-}
-
-function scoreFromCode(format, code) {
-  if (format === 'FT2') {
-    if (code === 0) return [2, 0];
-    if (code === 1) return [2, 1];
-  }
-  if (format === 'FT3') {
-    if (code === 0) return [3, 0];
-    if (code === 1) return [3, 1];
-    if (code === 2) return [3, 2];
-  }
-  return null;
-}
-
-function buildMatchAssignmentMessage(match, settings, status = 'Pending', details = '') {
-  const scoreGuide = settings.match_format === 'FT2'
-    ? 'Score reactions: 0️⃣ = winner 2-0, 1️⃣ = winner 2-1'
-    : 'Score reactions: 0️⃣ = winner 3-0, 1️⃣ = winner 3-1, 2️⃣ = winner 3-2';
-
-  return [
-    `**${settings.tournament_name || 'Tekken League'}**`,
-    `Match ${match.match_id}`,
-    `Player A: <@${match.player_a_discord_id}> vs Player B: <@${match.player_b_discord_id}>`,
-    `Status: ${status}`,
-    'Step 1 Winner: react 🇦 or 🇧',
-    `Step 2 Score (${settings.match_format}): ${scoreGuide}`,
-    details || '',
-  ].filter(Boolean).join('\n');
-}
-
 function getReadyQueueSnapshot() {
   return db.prepare(`
     SELECT p.tekken_tag, rq.discord_user_id, rq.since_ts
@@ -204,54 +116,14 @@ function buildStandingsMessage() {
   const completion = getCompletionStats(db, 1);
   const eligPct = db.prepare('SELECT eligibility_min_percent AS p FROM leagues WHERE league_id=1').get().p;
 
-  const rows = standings.slice(0, 20).map((s, idx) => {
+  const lines = standings.slice(0, 20).map((s, idx) => {
     const comp = completion.map.get(s.discord_user_id);
-    const completionPct = comp ? Math.round((comp.percent || 0) * 100) : 0;
     const eligible = (comp?.percent ?? 0) >= eligPct;
-
-    return {
-      rank: String(idx + 1),
-      player: s.tekken_tag,
-      pts: String(s.points),
-      w: String(s.wins),
-      l: String(s.losses),
-      diff: String(s.diff),
-      gw: String(s.games_won),
-      show: `${completionPct}%`,
-      elig: eligible ? 'Y' : 'N',
-    };
+    const completionPct = comp ? Math.round((comp.percent || 0) * 100) : 0;
+    return `${String(idx + 1).padStart(2, '0')}. ${s.tekken_tag} — ${s.points} pts | ${s.wins}-${s.losses} | diff ${s.diff} | GW ${s.games_won} | ${completionPct}%${eligible ? '' : ' (ineligible)'}`;
   });
 
-  const columns = [
-    { key: 'rank', title: '#' },
-    { key: 'player', title: 'PLAYER' },
-    { key: 'pts', title: 'PTS' },
-    { key: 'w', title: 'W' },
-    { key: 'l', title: 'L' },
-    { key: 'diff', title: 'DIFF' },
-    { key: 'gw', title: 'GW' },
-    { key: 'show', title: 'SHOW%' },
-    { key: 'elig', title: 'ELIG' },
-  ];
-
-  for (const col of columns) {
-    col.width = col.title.length;
-    for (const row of rows) {
-      col.width = Math.max(col.width, String(row[col.key]).length);
-    }
-  }
-
-  const formatRow = (obj) => columns.map((col) => {
-    const text = String(obj[col.key] ?? col.title);
-    return col.key === 'player' ? text.padEnd(col.width, ' ') : text.padStart(col.width, ' ');
-  }).join(' | ');
-
-  const header = formatRow(Object.fromEntries(columns.map(c => [c.key, c.title])));
-  const divider = columns.map(c => '-'.repeat(c.width)).join('-|-');
-  const body = rows.map(formatRow).join('\n');
-
-  const extra = standings.length > 20 ? `\nShowing top 20 of ${standings.length} players.` : '';
-  return `**Standings**\n\`\`\`\n${header}\n${divider}\n${body}\n\`\`\`${extra}`;
+  return `**Standings**\n${lines.join('\n')}`;
 }
 
 
@@ -977,7 +849,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         `).run(interaction.user.id, today);
 
         logAudit('checkin', interaction.user.id, { date: today });
-        await interaction.reply({ content: `Checked in for ${today}.` });
+        await interaction.reply({ content: `Checked in for ${today}.`, ephemeral: true });
         return;
       }
 
@@ -1000,7 +872,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
         addToReadyQueue(interaction.user.id);
         logAudit('queue_join', interaction.user.id);
-        await interaction.reply({ content: 'You are in the queue. Waiting for an opponent...' });
+        await interaction.reply({ content: 'You are in the queue. Waiting for an opponent...', ephemeral: true });
         await tryMatchmake(interaction.guild);
         return;
       }
@@ -1008,7 +880,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       if (name === 'unready') {
         removeFromReadyQueue(interaction.user.id);
         logAudit('queue_leave', interaction.user.id);
-        await interaction.reply({ content: 'Removed from queue.' });
+        await interaction.reply({ content: 'Removed from queue.', ephemeral: true });
         return;
       }
 
@@ -1043,24 +915,9 @@ ${lines.join('\n')}`, ephemeral: false });
             '• /queue — view current ready players',
             '• /standings or /table — view live standings table anytime',
             '• /mydata — view your private stored profile details',
-            'Admins: /admin_set_roles, /admin_list_roles, /admin_clear_roles, /admin_status, /admin_tournament_settings, /admin_setup_tournament, /admin_generate_fixtures, /admin_force_result, /admin_void_match, /admin_reset_league',
+            'Admins: /admin_status, /admin_tournament_settings, /admin_setup_tournament, /admin_generate_fixtures, /admin_force_result, /admin_void_match, /admin_reset_league',
           ].join('\n'),
-        });
-        return;
-      }
-
-
-      if (name === 'helpplayer') {
-        await interaction.reply({
-          content: [
-            '**Player Help**',
-            '1) `/signup` to register your league details.',
-            '2) `/checkin` daily to count attendance.',
-            '3) `/ready` when you can play now, `/unready` when you cannot.',
-            '4) Use `/standings` or `/table` anytime for the league table.',
-            '5) Use `/queue` to see who is currently available.',
-            '6) Use `/mydata` to view your saved profile (private).',
-          ].join('\n'),
+          ephemeral: true,
         });
         return;
       }
@@ -1161,66 +1018,6 @@ ${lines.join('\n')}`, ephemeral: false });
         const r = generateDoubleRoundRobinFixtures(db, 1);
         logAudit('admin_generate_fixtures', interaction.user.id, { ok: r.ok, message: r.message });
         await interaction.reply({ content: r.message, ephemeral: true });
-        return;
-      }
-
-
-      if (name === 'admin_set_roles') {
-        if (!(interaction.memberPermissions?.has(PermissionsBitField.Flags.Administrator))) {
-          await interaction.reply({ content: 'Only Discord server administrators can change admin role mapping.', ephemeral: true });
-          return;
-        }
-
-        const roles = [
-          interaction.options.getRole('role_1', true),
-          interaction.options.getRole('role_2'),
-          interaction.options.getRole('role_3'),
-          interaction.options.getRole('role_4'),
-          interaction.options.getRole('role_5'),
-        ].filter(Boolean);
-
-        const uniqueRoleIds = [...new Set(roles.map(r => r.id))];
-        const tx = db.transaction((ids) => {
-          db.prepare('DELETE FROM admin_roles WHERE league_id = 1 AND (guild_id = ? OR guild_id IS NULL)').run(String(interaction.guildId));
-          const ins = db.prepare('INSERT INTO admin_roles (league_id, guild_id, role_id) VALUES (1, ?, ?)');
-          for (const id of ids) ins.run(String(interaction.guildId), id);
-        });
-        tx(uniqueRoleIds);
-
-        logAudit('admin_set_roles', interaction.user.id, { role_ids: uniqueRoleIds });
-
-        await interaction.reply({
-          content: `Configured admin roles: ${uniqueRoleIds.map(id => `<@&${id}>`).join(', ')}`,
-          ephemeral: true,
-        });
-        return;
-      }
-
-      if (name === 'admin_list_roles') {
-        if (!isAdmin(interaction)) {
-          await interaction.reply({ content: 'Admin only.', ephemeral: true });
-          return;
-        }
-
-        const roleIds = getConfiguredAdminRoleIds(interaction.guildId);
-        const msg = roleIds.length
-          ? `Configured bot admin roles:
-${roleIds.map((id, i) => `${i + 1}. <@&${id}>`).join('\n')}`
-          : 'No bot-specific admin roles configured. Only users with Discord Administrator permission are treated as bot admins.';
-
-        await interaction.reply({ content: msg, ephemeral: true });
-        return;
-      }
-
-      if (name === 'admin_clear_roles') {
-        if (!(interaction.memberPermissions?.has(PermissionsBitField.Flags.Administrator))) {
-          await interaction.reply({ content: 'Only Discord server administrators can clear admin role mapping.', ephemeral: true });
-          return;
-        }
-
-        db.prepare('DELETE FROM admin_roles WHERE league_id = 1 AND (guild_id = ? OR guild_id IS NULL)').run(String(interaction.guildId));
-        logAudit('admin_clear_roles', interaction.user.id);
-        await interaction.reply({ content: 'Cleared configured bot admin roles. Bot admin access now falls back to Discord Administrator permission only.', ephemeral: true });
         return;
       }
 
@@ -1471,7 +1268,7 @@ ${buildTournamentSettingsMessage()}`,
         const phone = normalizePhone(interaction.fields.getTextInputValue('phone'));
 
         if (!realName || !tekkenTag) {
-          await interaction.reply({ content: 'Real name and Tekken tag are required.' });
+          await interaction.reply({ content: 'Real name and Tekken tag are required.', ephemeral: true });
           return;
         }
 

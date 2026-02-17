@@ -47,7 +47,6 @@ Players:
 - /helpplayer
 
 Admins (requires Administrator permission in the server):
-- /bot_settings
 - /admin_set_roles
 - /admin_list_roles
 - /admin_clear_roles
@@ -77,7 +76,3 @@ Use `/admin_setup_tournament` to configure the league before generating fixtures
 - minimum show-up %
 
 Use `/admin_tournament_settings` any time to review the current configuration.
-
-## Public-by-default behavior
-Player-facing commands respond in-channel by default (no DMs).
-Match assignments and result workflows are posted publicly in the configured results channel (set via `/bot_settings set_results_channel`).
