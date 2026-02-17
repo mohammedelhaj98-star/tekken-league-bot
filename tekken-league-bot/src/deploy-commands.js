@@ -16,6 +16,10 @@ const commands = [
     .setDescription('Health check'),
 
   new SlashCommandBuilder()
+    .setName('help')
+    .setDescription('Show a quick guide to league commands'),
+
+  new SlashCommandBuilder()
     .setName('signup')
     .setDescription('Register for the league (Real name, Tekken tag, email, phone)'),
 
@@ -40,8 +44,56 @@ const commands = [
     .setDescription('Show current league standings'),
 
   new SlashCommandBuilder()
+    .setName('table')
+    .setDescription('Alias for /standings'),
+
+  new SlashCommandBuilder()
+    .setName('queue')
+    .setDescription('Show who is currently in the ready queue'),
+
+  new SlashCommandBuilder()
     .setName('admin_generate_fixtures')
     .setDescription('Admin: generate double round robin fixtures for all signed-up players')
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
+  new SlashCommandBuilder()
+    .setName('admin_status')
+    .setDescription('Admin: quick snapshot of league health and queue state')
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
+
+  new SlashCommandBuilder()
+    .setName('admin_setup_tournament')
+    .setDescription('Admin: configure tournament settings for this league')
+    .addIntegerOption(o => o
+      .setName('max_players')
+      .setDescription('Maximum players (2-1024)')
+      .setRequired(false))
+    .addIntegerOption(o => o
+      .setName('timeslot_count')
+      .setDescription('No. of timeslots per day (1-24)')
+      .setRequired(false))
+    .addIntegerOption(o => o
+      .setName('timeslot_duration_minutes')
+      .setDescription('Duration of each timeslot in minutes (15-1440)')
+      .setRequired(false))
+    .addStringOption(o => o
+      .setName('timeslot_starts')
+      .setDescription('Comma-separated start times in 24h format, e.g. 18:00,20:00')
+      .setRequired(false))
+    .addIntegerOption(o => o
+      .setName('total_tournament_days')
+      .setDescription('Total tournament days (1-365)')
+      .setRequired(false))
+    .addNumberOption(o => o
+      .setName('minimum_showup_percent')
+      .setDescription('Minimum show-up percentage required (0-100)')
+      .setRequired(false))
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
+  new SlashCommandBuilder()
+    .setName('admin_tournament_settings')
+    .setDescription('Admin: view current tournament setup settings')
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 
   new SlashCommandBuilder()
