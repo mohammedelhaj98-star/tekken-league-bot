@@ -1,5 +1,4 @@
+.env
 node_modules/
 data/
-.env
 *.log
-.DS_Store
