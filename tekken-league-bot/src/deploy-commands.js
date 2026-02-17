@@ -106,6 +106,10 @@ const commands = [
       .setDescription('Set channel for dispute notifications')
       .addChannelOption(o => o.setName('channel').setDescription('Dispute channel').setRequired(true)))
     .addSubcommand(sc => sc
+      .setName('set_activity_channel')
+      .setDescription('Set channel for signup/checkin/ready activity notifications')
+      .addChannelOption(o => o.setName('channel').setDescription('Activity channel').setRequired(true)))
+    .addSubcommand(sc => sc
       .setName('set_cleanup_policy')
       .setDescription('Set message cleanup policy')
       .addStringOption(o => o.setName('policy').setDescription('Policy').setRequired(true).addChoices(
@@ -195,6 +199,21 @@ const commands = [
   new SlashCommandBuilder()
     .setName('admin_tournament_settings')
     .setDescription('Admin: view current tournament setup settings')
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
+
+  new SlashCommandBuilder()
+    .setName('admin_reset')
+    .setDescription('Admin: reset checkins, league state, or everything')
+    .addStringOption(o => o
+      .setName('level')
+      .setDescription('Reset level')
+      .setRequired(true)
+      .addChoices(
+        { name: 'checkins', value: 'checkins' },
+        { name: 'league', value: 'league' },
+        { name: 'everything (includes signups)', value: 'everything' },
+      ))
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 
   new SlashCommandBuilder()

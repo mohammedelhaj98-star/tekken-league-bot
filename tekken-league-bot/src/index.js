@@ -85,6 +85,71 @@ function isAdmin(interaction) {
   return roleIds.some(id => configured.includes(id));
 }
 
+async function getAdminNotificationUserIds(guild) {
+  const members = await guild.members.fetch().catch(() => null);
+  if (!members) return [];
+
+  const ids = [];
+  for (const member of members.values()) {
+    if (member.user?.bot) continue;
+    if (isAdminMember(member, guild.id)) ids.push(member.id);
+  }
+  return [...new Set(ids)];
+}
+
+async function notifyAdminsAboutReset(guild, requestedByUser, message) {
+  const adminIds = await getAdminNotificationUserIds(guild);
+  if (!adminIds.length) {
+    await requestedByUser.send({ content: message }).catch(() => null);
+    return;
+  }
+
+  for (const id of adminIds) {
+    const user = await guild.client.users.fetch(id).catch(() => null);
+    if (!user) continue;
+    await user.send({ content: message }).catch(() => null);
+  }
+}
+
+function runLeagueReset(level) {
+  const today = getTodayISO(true);
+
+  if (level === 'checkins') {
+    db.prepare('DELETE FROM ready_queue WHERE league_id = 1').run();
+    db.prepare('DELETE FROM attendance WHERE league_id = 1 AND date = ?').run(today);
+    return `Reset level: checkins (cleared today's attendance + ready queue for ${today}).`;
+  }
+
+  if (level === 'everything') {
+    db.exec(`
+      DELETE FROM rematch_votes;
+      DELETE FROM admin_match_overrides;
+      DELETE FROM match_reports;
+      DELETE FROM results;
+      DELETE FROM pending_matches;
+      DELETE FROM matches;
+      DELETE FROM fixtures;
+      DELETE FROM ready_queue;
+      DELETE FROM attendance;
+      DELETE FROM players;
+    `);
+    return 'Reset level: everything (league state + signups removed).';
+  }
+
+  db.exec(`
+    DELETE FROM rematch_votes;
+    DELETE FROM admin_match_overrides;
+    DELETE FROM match_reports;
+    DELETE FROM results;
+    DELETE FROM pending_matches;
+    DELETE FROM matches;
+    DELETE FROM fixtures;
+    DELETE FROM ready_queue;
+    DELETE FROM attendance;
+  `);
+  return 'Reset level: league (players preserved).';
+}
+
 function getDisplayNameFromInteraction(interaction) {
   const member = interaction.member;
   if (member && typeof member.displayName === 'string') return member.displayName;
@@ -145,6 +210,7 @@ function updateGuildSetting(guildId, patch) {
       admin_channel_id = ?,
       standings_channel_id = ?,
       dispute_channel_id = ?,
+      activity_channel_id = ?,
       match_format = ?,
       allow_public_player_commands = ?,
       tournament_name = ?,
@@ -159,6 +225,7 @@ function updateGuildSetting(guildId, patch) {
     merged.admin_channel_id || null,
     merged.standings_channel_id || null,
     merged.dispute_channel_id || null,
+    merged.activity_channel_id || null,
     merged.match_format || 'FT3',
     merged.allow_public_player_commands ? 1 : 0,
     merged.tournament_name || 'Tekken League',
@@ -181,6 +248,14 @@ function getDisputeNotificationChannelId(settings) {
 
 async function sendDisputeNotification(guild, settings, content) {
   const channelId = getDisputeNotificationChannelId(settings);
+  if (!channelId) return;
+  const channel = await guild.channels.fetch(channelId).catch(() => null);
+  if (!channel || !channel.isTextBased()) return;
+  await channel.send({ content }).catch(() => null);
+}
+
+async function sendActivityNotification(guild, settings, content) {
+  const channelId = settings.activity_channel_id || settings.admin_channel_id || null;
   if (!channelId) return;
   const channel = await guild.channels.fetch(channelId).catch(() => null);
   if (!channel || !channel.isTextBased()) return;
@@ -1335,6 +1410,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         `).run(interaction.user.id, today);
 
         logAudit('checkin', interaction.user.id, { date: today });
+        await sendActivityNotification(interaction.guild, getGuildSettings(interaction.guildId), `✅ Check-in: <@${interaction.user.id}> on ${today}.`).catch(() => null);
         await interaction.reply({ content: `Checked in for ${today}.` });
         return;
       }
@@ -1358,6 +1434,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
         addToReadyQueue(interaction.user.id);
         logAudit('queue_join', interaction.user.id);
+        await sendActivityNotification(interaction.guild, getGuildSettings(interaction.guildId), `🟢 Ready: <@${interaction.user.id}> joined the queue.`).catch(() => null);
         await interaction.reply({ content: 'You are in the queue. Waiting for an opponent...' });
         await tryMatchmake(interaction.guild);
         return;
@@ -1433,7 +1510,7 @@ ${lines.join('\n')}`, ephemeral: false });
             '• /standings or /table — view live standings table anytime',
             '• /matches — view recent match IDs and statuses',
             '• /mydata — view your private stored profile details',
-            'Admins: /bot_settings, /admin_status, /admin_player_matches, /admin_player_left, /admin_tournament_settings, /admin_setup_tournament, /admin_generate_fixtures, /admin_force_result, /admin_void_match, /admin_dispute_match, /admin_reset_league',
+            'Admins: /bot_settings, /admin_status, /admin_player_matches, /admin_player_left, /admin_tournament_settings, /admin_setup_tournament, /admin_generate_fixtures, /admin_force_result, /admin_void_match, /admin_dispute_match, /admin_reset, /admin_reset_league',
           ].join('\n'),
         });
         return;
@@ -1477,6 +1554,7 @@ ${lines.join('\n')}`, ephemeral: false });
               `adminChannelId: ${gs.admin_channel_id || '(not set)'}`,
               `standingsChannelId: ${gs.standings_channel_id || '(not set)'}`,
               `disputeChannelId: ${gs.dispute_channel_id || '(not set)'}`,
+              `activityChannelId: ${gs.activity_channel_id || '(not set)'}`,
               `matchFormat: ${gs.match_format}`,
               `allowPublicPlayerCommands: ${gs.allow_public_player_commands ? 'true' : 'false'}`,
               `tournamentName: ${gs.tournament_name}`,
@@ -1519,6 +1597,7 @@ ${lines.join('\n')}`, ephemeral: false });
         if (sub === 'set_timezone') patch.timezone = interaction.options.getString('tz', true).trim();
         if (sub === 'set_standings_channel') patch.standings_channel_id = interaction.options.getChannel('channel', true).id;
         if (sub === 'set_dispute_channel') patch.dispute_channel_id = interaction.options.getChannel('channel', true).id;
+        if (sub === 'set_activity_channel') patch.activity_channel_id = interaction.options.getChannel('channel', true).id;
         if (sub === 'set_diagnostics') patch.enable_diagnostics = interaction.options.getBoolean('enabled', true) ? 1 : 0;
         if (sub === 'set_allow_public_player_commands') patch.allow_public_player_commands = interaction.options.getBoolean('enabled', true) ? 1 : 0;
         if (sub === 'set_cleanup_policy') {
@@ -1718,22 +1797,42 @@ ${buildTournamentSettingsMessage()}`,
         return;
       }
 
+      if (name === 'admin_reset') {
+        if (!isAdmin(interaction)) {
+          await interaction.reply({ content: 'Admin only.', ephemeral: true });
+          return;
+        }
+
+        const level = interaction.options.getString('level', true);
+        const planned = `⚠️ Reset requested by ${interaction.user.tag} (${interaction.user.id}).
+${level === 'checkins' ? 'About to reset check-ins session (today attendance + queue).' : level === 'everything' ? 'About to reset EVERYTHING (including signups).' : 'About to reset league state (players preserved).'}`;
+        await notifyAdminsAboutReset(interaction.guild, interaction.user, planned);
+
+        const summary = runLeagueReset(level);
+        logAudit('admin_reset', interaction.user.id, { level, summary });
+
+        await notifyAdminsAboutReset(interaction.guild, interaction.user, `✅ Reset completed by ${interaction.user.tag} (${interaction.user.id}).
+${summary}`);
+        await interaction.reply({ content: summary, ephemeral: true });
+        return;
+      }
+
       if (name === 'admin_reset_league') {
         if (!isAdmin(interaction)) {
           await interaction.reply({ content: 'Admin only.', ephemeral: true });
           return;
         }
-        // Wipe league state (keep players)
-        db.exec(`
-          DELETE FROM fixtures;
-          DELETE FROM pending_matches;
-          DELETE FROM matches;
-          DELETE FROM results;
-          DELETE FROM ready_queue;
-          DELETE FROM attendance;
-        `);
-        logAudit('admin_reset_league', interaction.user.id);
-        await interaction.reply({ content: 'League data reset (players preserved).', ephemeral: true });
+
+        const planned = `⚠️ Reset requested by ${interaction.user.tag} (${interaction.user.id}).
+About to reset league state (players preserved).`;
+        await notifyAdminsAboutReset(interaction.guild, interaction.user, planned);
+
+        const summary = runLeagueReset('league');
+        logAudit('admin_reset_league', interaction.user.id, { level: 'league', summary });
+
+        await notifyAdminsAboutReset(interaction.guild, interaction.user, `✅ Reset completed by ${interaction.user.tag} (${interaction.user.id}).
+${summary}`);
+        await interaction.reply({ content: summary, ephemeral: true });
         return;
       }
 
@@ -1921,6 +2020,7 @@ ${buildTournamentSettingsMessage()}`,
         }
 
         logAudit('signup_upsert', interaction.user.id, { tekkenTag });
+        await sendActivityNotification(interaction.guild, getGuildSettings(interaction.guildId), `📝 Signup: <@${interaction.user.id}> registered/updated as **${tekkenTag}**.`).catch(() => null);
         await interaction.reply({
           content: 'Signup saved. Use /checkin daily and /ready when you are free to play.',
           ephemeral: true,

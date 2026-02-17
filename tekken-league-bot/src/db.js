@@ -170,6 +170,7 @@ function initDb(db) {
       admin_channel_id TEXT,
       standings_channel_id TEXT,
       dispute_channel_id TEXT,
+      activity_channel_id TEXT,
       match_format TEXT NOT NULL DEFAULT 'FT3',
       allow_public_player_commands INTEGER NOT NULL DEFAULT 1,
       tournament_name TEXT NOT NULL DEFAULT 'Tekken League',
@@ -197,6 +198,7 @@ function initDb(db) {
   ensureColumn('matches', 'match_message_id', 'match_message_id TEXT');
   ensureColumn('admin_roles', 'guild_id', 'guild_id TEXT');
   ensureColumn('guild_settings', 'dispute_channel_id', 'dispute_channel_id TEXT');
+  ensureColumn('guild_settings', 'activity_channel_id', 'activity_channel_id TEXT');
 
 
   const createIndexStatements = [

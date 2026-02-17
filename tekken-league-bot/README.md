@@ -54,10 +54,12 @@ Admins (requires Administrator permission in the server):
 - /admin_status
 - /admin_player_matches
 - /admin_player_left
+- /bot_settings set_activity_channel
 - /admin_tournament_settings
 - /admin_setup_tournament
 - /admin_generate_fixtures
-- /admin_reset_league (dangerous)
+- /admin_reset (levels: checkins | league | everything)
+- /admin_reset_league (legacy alias for league-level reset)
  - /admin_force_result
  - /admin_void_match
  - /admin_dispute_match
@@ -85,6 +87,7 @@ Use `/admin_tournament_settings` any time to review the current configuration.
 Player-facing commands respond in-channel by default (no DMs).
 Match assignments and result workflows are posted publicly in the configured results channel (set via `/bot_settings set_results_channel`).
 Dispute notifications can be routed to a dedicated channel via `/bot_settings set_dispute_channel`.
+Signup/check-in/ready activity notifications can be routed via `/bot_settings set_activity_channel`.
 
 
 ## Fixture history and notifications
@@ -99,3 +102,6 @@ Dispute notifications can be routed to a dedicated channel via `/bot_settings se
 - Players can `/ready` at different times; the bot keeps them in queue and matches automatically when compatible opponents are available.
 - Matchmaking also runs periodically in the background (`MATCHMAKER_INTERVAL_MS`, default 30000ms), so you do not need to manually generate or post match lists each time.
 - Missing fixtures are auto-generated during matchmaking without duplicating historical pair/leg records.
+
+
+Each reset sends DM notifications to the requesting admin and all other admins, including who requested it and what level is being executed.
