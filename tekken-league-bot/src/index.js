@@ -39,8 +39,31 @@ const client = new Client({
   intents: [GatewayIntentBits.Guilds],
 });
 
+function getConfiguredAdminRoleIds() {
+  return db.prepare('SELECT role_id FROM admin_roles WHERE league_id = 1 ORDER BY role_id ASC').all().map(r => r.role_id);
+}
+
+function getInteractionRoleIds(interaction) {
+  const memberRoles = interaction.member?.roles;
+  if (!memberRoles) return [];
+
+  if (Array.isArray(memberRoles)) return memberRoles;
+
+  if (memberRoles.cache && typeof memberRoles.cache.values === 'function') {
+    return Array.from(memberRoles.cache.values()).map(role => role.id);
+  }
+
+  return [];
+}
+
 function isAdmin(interaction) {
-  return interaction.memberPermissions?.has(PermissionsBitField.Flags.Administrator) ?? false;
+  if (interaction.memberPermissions?.has(PermissionsBitField.Flags.Administrator)) return true;
+
+  const configured = getConfiguredAdminRoleIds();
+  if (!configured.length) return false;
+
+  const roleIds = getInteractionRoleIds(interaction);
+  return roleIds.some(id => configured.includes(id));
 }
 
 function getDisplayNameFromInteraction(interaction) {

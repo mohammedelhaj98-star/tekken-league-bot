@@ -44,8 +44,12 @@ Players:
 - /table
 - /queue
 - /help
+- /helpplayer
 
 Admins (requires Administrator permission in the server):
+- /admin_set_roles
+- /admin_list_roles
+- /admin_clear_roles
 - /admin_status
 - /admin_tournament_settings
 - /admin_setup_tournament
