@@ -45,11 +45,10 @@ Players:
 - /queue
 - /help
 - /helpplayer
+- /playerhelp
 
 Admins (requires Administrator permission in the server):
-- /admin_set_roles
-- /admin_list_roles
-- /admin_clear_roles
+- /bot_settings
 - /admin_status
 - /admin_tournament_settings
 - /admin_setup_tournament
@@ -76,3 +75,19 @@ Use `/admin_setup_tournament` to configure the league before generating fixtures
 - minimum show-up %
 
 Use `/admin_tournament_settings` any time to review the current configuration.
+
+## Public-by-default behavior
+Player-facing commands respond in-channel by default (no DMs).
+Match assignments and result workflows are posted publicly in the configured results channel (set via `/bot_settings set_results_channel`).
+
+
+## Fixture history and notifications
+- You can run `/admin_generate_fixtures` repeatedly; it only adds missing pair/leg fixtures and keeps full history.
+- Confirmed matches are immutable for players and only changeable by admins via admin commands.
+- When a match is created, it is posted publicly in the results channel and each player also receives a DM reminder with the fixture details.
+
+
+## Automatic queue matching
+- Players can `/ready` at different times; the bot keeps them in queue and matches automatically when compatible opponents are available.
+- Matchmaking also runs periodically in the background (`MATCHMAKER_INTERVAL_MS`, default 30000ms), so you do not need to manually generate or post match lists each time.
+- Missing fixtures are auto-generated during matchmaking without duplicating historical pair/leg records.

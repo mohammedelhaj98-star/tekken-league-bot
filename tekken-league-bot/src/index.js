@@ -41,8 +41,12 @@ const client = new Client({
   partials: [Partials.Message, Partials.Channel, Partials.Reaction],
 });
 
-function getConfiguredAdminRoleIds() {
-  return db.prepare('SELECT role_id FROM admin_roles WHERE league_id = 1 ORDER BY role_id ASC').all().map(r => r.role_id);
+function getConfiguredAdminRoleIds(guildId) {
+  return db.prepare(`
+    SELECT role_id FROM admin_roles
+    WHERE league_id = 1 AND (guild_id = ? OR guild_id IS NULL)
+    ORDER BY role_id ASC
+  `).all(String(guildId || '')).map(r => r.role_id);
 }
 
 function getInteractionRoleIds(interaction) {
@@ -61,7 +65,7 @@ function getInteractionRoleIds(interaction) {
 function isAdmin(interaction) {
   if (interaction.memberPermissions?.has(PermissionsBitField.Flags.Administrator)) return true;
 
-  const configured = getConfiguredAdminRoleIds();
+  const configured = getConfiguredAdminRoleIds(interaction.guildId);
   if (!configured.length) return false;
 
   const roleIds = getInteractionRoleIds(interaction);
@@ -100,6 +104,90 @@ function logAudit(actionType, actorDiscordId, payload = null) {
   `).run(actorDiscordId || null, actionType, payload ? JSON.stringify(payload) : null);
 }
 
+
+function getGuildSettings(guildId) {
+  const id = String(guildId || '');
+  let row = db.prepare('SELECT * FROM guild_settings WHERE guild_id = ?').get(id);
+  if (!row) {
+    db.prepare(`
+      INSERT INTO guild_settings (
+        guild_id,
+        results_channel_id,
+        tournament_name,
+        timezone
+      ) VALUES (?, ?, ?, 'Asia/Qatar')
+    `).run(id, MATCH_CHANNEL_ID || null, process.env.LEAGUE_NAME || 'Tekken League');
+    row = db.prepare('SELECT * FROM guild_settings WHERE guild_id = ?').get(id);
+  }
+  return row;
+}
+
+function updateGuildSetting(guildId, patch) {
+  const current = getGuildSettings(guildId);
+  const merged = { ...current, ...patch };
+  db.prepare(`
+    UPDATE guild_settings
+    SET
+      results_channel_id = ?,
+      admin_channel_id = ?,
+      standings_channel_id = ?,
+      match_format = ?,
+      allow_public_player_commands = ?,
+      tournament_name = ?,
+      timezone = ?,
+      cleanup_policy = ?,
+      cleanup_days = ?,
+      enable_diagnostics = ?,
+      updated_at = datetime('now')
+    WHERE guild_id = ?
+  `).run(
+    merged.results_channel_id || null,
+    merged.admin_channel_id || null,
+    merged.standings_channel_id || null,
+    merged.match_format || 'FT3',
+    merged.allow_public_player_commands ? 1 : 0,
+    merged.tournament_name || 'Tekken League',
+    merged.timezone || 'Asia/Qatar',
+    merged.cleanup_policy || 'keep',
+    merged.cleanup_days || null,
+    merged.enable_diagnostics ? 1 : 0,
+    String(guildId || ''),
+  );
+}
+
+function getScoreReactionsForFormat(format) {
+  return format === 'FT2' ? ['0️⃣', '1️⃣'] : ['0️⃣', '1️⃣', '2️⃣'];
+}
+
+function scoreFromCode(format, code) {
+  if (format === 'FT2') {
+    if (code === 0) return [2, 0];
+    if (code === 1) return [2, 1];
+  }
+  if (format === 'FT3') {
+    if (code === 0) return [3, 0];
+    if (code === 1) return [3, 1];
+    if (code === 2) return [3, 2];
+  }
+  return null;
+}
+
+function buildMatchAssignmentMessage(match, settings, status = 'Pending', details = '') {
+  const scoreGuide = settings.match_format === 'FT2'
+    ? 'Score reactions: 0️⃣ = winner 2-0, 1️⃣ = winner 2-1'
+    : 'Score reactions: 0️⃣ = winner 3-0, 1️⃣ = winner 3-1, 2️⃣ = winner 3-2';
+
+  return [
+    `**${settings.tournament_name || 'Tekken League'}**`,
+    `Match ${match.match_id}`,
+    `Player A: <@${match.player_a_discord_id}> vs Player B: <@${match.player_b_discord_id}>`,
+    `Status: ${status}`,
+    'Step 1 Winner: react 🇦 or 🇧',
+    `Step 2 Score (${settings.match_format}): ${scoreGuide}`,
+    details || '',
+  ].filter(Boolean).join('\n');
+}
+
 function getReadyQueueSnapshot() {
   return db.prepare(`
     SELECT p.tekken_tag, rq.discord_user_id, rq.since_ts
@@ -110,21 +198,63 @@ function getReadyQueueSnapshot() {
   `).all();
 }
 
-function buildStandingsMessage() {
+function buildStandingsListMessage() {
   const standings = computeStandings(db, 1);
   if (!standings.length) return '**Standings**\nNo active players yet. Use /signup to join the league.';
+
+  const lines = standings.map((s, idx) => `${idx + 1}. ${s.tekken_tag}`);
+  return `**Standings**\n${lines.join('\n')}`;
+}
+
+function buildStandingsTableMessage() {
+  const standings = computeStandings(db, 1);
+  if (!standings.length) return '**Table**\nNo active players yet. Use /signup to join the league.';
 
   const completion = getCompletionStats(db, 1);
   const eligPct = db.prepare('SELECT eligibility_min_percent AS p FROM leagues WHERE league_id=1').get().p;
 
-  const lines = standings.slice(0, 20).map((s, idx) => {
+  const rows = standings.slice(0, 20).map((s, idx) => {
     const comp = completion.map.get(s.discord_user_id);
-    const eligible = (comp?.percent ?? 0) >= eligPct;
     const completionPct = comp ? Math.round((comp.percent || 0) * 100) : 0;
-    return `${String(idx + 1).padStart(2, '0')}. ${s.tekken_tag} — ${s.points} pts | ${s.wins}-${s.losses} | diff ${s.diff} | GW ${s.games_won} | ${completionPct}%${eligible ? '' : ' (ineligible)'}`;
+    const eligible = (comp?.percent ?? 0) >= eligPct;
+
+    return {
+      rank: String(idx + 1),
+      player: s.tekken_tag,
+      pts: String(s.points),
+      w: String(s.wins),
+      l: String(s.losses),
+      diff: String(s.diff),
+      gw: String(s.games_won),
+      show: `${completionPct}%`,
+      elig: eligible ? 'Y' : 'N',
+    };
   });
 
-  return `**Standings**\n${lines.join('\n')}`;
+  const cols = [
+    { key: 'rank', header: '#' },
+    { key: 'player', header: 'PLAYER' },
+    { key: 'pts', header: 'PTS' },
+    { key: 'w', header: 'W' },
+    { key: 'l', header: 'L' },
+    { key: 'diff', header: 'DIFF' },
+    { key: 'gw', header: 'GW' },
+    { key: 'show', header: 'SHOW%' },
+    { key: 'elig', header: 'ELIG' },
+  ];
+
+  for (const col of cols) {
+    col.width = col.header.length;
+    for (const row of rows) col.width = Math.max(col.width, String(row[col.key]).length);
+  }
+
+  const pad = (text, width, left = false) => left ? String(text).padEnd(width, ' ') : String(text).padStart(width, ' ');
+  const top = `+${cols.map(c => '-'.repeat(c.width + 2)).join('+')}+`;
+  const header = `| ${cols.map(c => pad(c.header, c.width, c.key === 'player')).join(' | ')} |`;
+  const body = rows.map(r => `| ${cols.map(c => pad(r[c.key], c.width, c.key === 'player')).join(' | ')} |`).join('\n');
+
+  const extra = standings.length > 20 ? `\nShowing top 20 of ${standings.length} players.` : '';
+  return `**Table**\n\`\`\`\n${top}\n${header}\n${top}\n${body}\n${top}\n\`\`\`${extra}`;
 }
 
 
@@ -259,6 +389,17 @@ async function createPendingMatch(fixture, channel, guildId) {
     allowed_mentions: { users: [a, b], roles: [], replied_user: false },
   });
 
+  // DM each player with their specific fixture details (best effort).
+  const dmText = [
+    `You have a new league fixture in **${settings.tournament_name || 'Tekken League'}**.`,
+    `Match ${matchRow.match_id}`,
+    `Player A: <@${a}> vs Player B: <@${b}>`,
+    `Please report in <#${channel.id}> using the reactions on the match message.`,
+  ].join('\n');
+
+  await channel.client.users.fetch(a).then(u => u.send(dmText)).catch(() => null);
+  await channel.client.users.fetch(b).then(u => u.send(dmText)).catch(() => null);
+
   await msg.react('🇦').catch(() => null);
   await msg.react('🇧').catch(() => null);
 
@@ -278,6 +419,12 @@ async function tryMatchmake(guild) {
   if (!channel || !channel.isTextBased()) {
     logAudit('matchmaking_channel_missing', null, { guildId: guild.id, channelId });
     return;
+  }
+
+  // Auto-generate any missing fixtures so admins do not need to manually regenerate each time.
+  const autoGen = generateDoubleRoundRobinFixtures(db, 1);
+  if (autoGen.ok && autoGen.message.startsWith('Generated ')) {
+    logAudit('auto_generate_fixtures', null, { guildId: guild.id, message: autoGen.message });
   }
 
   const ready = popReadyUsers().filter(id => !hasActiveMatch(id));
@@ -750,6 +897,26 @@ client.on(Events.MessageReactionAdd, async (reaction, user) => {
   }
 });
 
+let matchmakerTimer = null;
+
+async function runMatchmakingTick() {
+  for (const guild of client.guilds.cache.values()) {
+    await tryMatchmake(guild).catch((err) => {
+      console.error('Background matchmaking tick error:', err);
+    });
+  }
+}
+
+function invokeMatchmakingTickSafely() {
+  if (typeof runMatchmakingTick !== 'function') {
+    console.error('Matchmaking tick skipped: runMatchmakingTick is not defined');
+    return;
+  }
+  runMatchmakingTick().catch((err) => {
+    console.error('Background matchmaking tick failed:', err);
+  });
+}
+
 client.once(Events.ClientReady, () => {
   console.log(`Logged in as ${client.user.tag}`);
 
@@ -762,11 +929,11 @@ client.once(Events.ClientReady, () => {
     : 30000;
 
   matchmakerTimer = setInterval(() => {
-    runMatchmakingTick().catch(() => null);
+    invokeMatchmakingTickSafely();
   }, interval);
 
   // Kick one immediate pass on startup.
-  runMatchmakingTick().catch(() => null);
+  invokeMatchmakingTickSafely();
 });
 
 client.on(Events.InteractionCreate, async (interaction) => {
@@ -865,7 +1032,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         `).run(interaction.user.id, today);
 
         logAudit('checkin', interaction.user.id, { date: today });
-        await interaction.reply({ content: `Checked in for ${today}.`, ephemeral: true });
+        await interaction.reply({ content: `Checked in for ${today}.` });
         return;
       }
 
@@ -888,7 +1055,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
         addToReadyQueue(interaction.user.id);
         logAudit('queue_join', interaction.user.id);
-        await interaction.reply({ content: 'You are in the queue. Waiting for an opponent...', ephemeral: true });
+        await interaction.reply({ content: 'You are in the queue. Waiting for an opponent...' });
         await tryMatchmake(interaction.guild);
         return;
       }
@@ -896,13 +1063,21 @@ client.on(Events.InteractionCreate, async (interaction) => {
       if (name === 'unready') {
         removeFromReadyQueue(interaction.user.id);
         logAudit('queue_leave', interaction.user.id);
-        await interaction.reply({ content: 'Removed from queue.', ephemeral: true });
+        await interaction.reply({ content: 'Removed from queue.' });
         return;
       }
 
-      if (name === 'standings' || name === 'table') {
+      if (name === 'standings') {
         await interaction.reply({
-          content: buildStandingsMessage(),
+          content: buildStandingsListMessage(),
+          ephemeral: false,
+        });
+        return;
+      }
+
+      if (name === 'table') {
+        await interaction.reply({
+          content: buildStandingsTableMessage(),
           ephemeral: false,
         });
         return;
@@ -931,9 +1106,25 @@ ${lines.join('\n')}`, ephemeral: false });
             '• /queue — view current ready players',
             '• /standings or /table — view live standings table anytime',
             '• /mydata — view your private stored profile details',
-            'Admins: /admin_status, /admin_tournament_settings, /admin_setup_tournament, /admin_generate_fixtures, /admin_force_result, /admin_void_match, /admin_reset_league',
+            'Admins: /bot_settings, /admin_status, /admin_tournament_settings, /admin_setup_tournament, /admin_generate_fixtures, /admin_force_result, /admin_void_match, /admin_reset_league',
           ].join('\n'),
-          ephemeral: true,
+        });
+        return;
+      }
+
+
+      if (name === 'helpplayer' || name === 'playerhelp') {
+        await interaction.reply({
+          content: [
+            '**Player Help**',
+            '1) `/signup` to register your league details.',
+            '2) `/checkin` daily to count attendance.',
+            '3) `/ready` when you can play now, `/unready` when you cannot.',
+            '4) Use `/standings` or `/table` anytime for the league table.',
+            '5) Use `/queue` to see who is currently available.',
+            '6) Use `/mydata` to view your saved profile (private).',
+            'Tip: `/playerhelp` is an alias if `/helpplayer` is hard to find.',
+          ].join('\n'),
         });
         return;
       }
@@ -1036,6 +1227,10 @@ ${lines.join('\n')}`, ephemeral: false });
         await interaction.reply({ content: r.message, ephemeral: true });
         return;
       }
+
+
+
+
 
       if (name === 'admin_status') {
         if (!isAdmin(interaction)) {
@@ -1284,7 +1479,7 @@ ${buildTournamentSettingsMessage()}`,
         const phone = normalizePhone(interaction.fields.getTextInputValue('phone'));
 
         if (!realName || !tekkenTag) {
-          await interaction.reply({ content: 'Real name and Tekken tag are required.', ephemeral: true });
+          await interaction.reply({ content: 'Real name and Tekken tag are required.' });
           return;
         }
 
@@ -1487,6 +1682,7 @@ ${buildTournamentSettingsMessage()}`,
 function shutdown(signal) {
   console.log(`${signal} received, shutting down gracefully...`);
   try {
+    if (matchmakerTimer) clearInterval(matchmakerTimer);
     db.close();
   } catch (err) {
     console.error('Failed to close database cleanly:', err);

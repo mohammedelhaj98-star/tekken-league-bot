@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const Database = require('better-sqlite3');
 
 const { initDb } = require('../src/db');
-const { calcMatchPoints, computeStandings } = require('../src/league');
+const { calcMatchPoints, computeStandings, generateDoubleRoundRobinFixtures } = require('../src/league');
 
 function setupDb() {
   const db = new Database(':memory:');
@@ -63,6 +63,24 @@ test('computeStandings ranks by points then diff then games won', () => {
   assert.equal(standings[0].points, 3);
   assert.equal(standings[1].discord_user_id, 'u2');
   assert.equal(standings[2].discord_user_id, 'u3');
+
+  db.close();
+});
+
+
+test('generateDoubleRoundRobinFixtures can run repeatedly without duplicating history', () => {
+  const db = setupDb();
+
+  const first = generateDoubleRoundRobinFixtures(db, 1);
+  assert.equal(first.ok, true);
+  assert.match(first.message, /Generated 6 new fixtures/);
+
+  const second = generateDoubleRoundRobinFixtures(db, 1);
+  assert.equal(second.ok, true);
+  assert.match(second.message, /No new fixtures generated/);
+
+  const total = db.prepare('SELECT COUNT(1) AS c FROM fixtures WHERE league_id = 1').get().c;
+  assert.equal(total, 6);
 
   db.close();
 });
