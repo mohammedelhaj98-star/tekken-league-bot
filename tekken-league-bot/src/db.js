@@ -91,14 +91,28 @@ function initDb(db) {
     CREATE TABLE IF NOT EXISTS matches (
       match_id INTEGER PRIMARY KEY AUTOINCREMENT,
       league_id INTEGER NOT NULL,
+      guild_id TEXT,
       fixture_id INTEGER NOT NULL,
       player_a_discord_id TEXT NOT NULL,
       player_b_discord_id TEXT NOT NULL,
       state TEXT NOT NULL DEFAULT 'active',
       thread_id TEXT,
+      match_channel_id TEXT,
+      match_message_id TEXT,
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       ended_at TEXT,
       FOREIGN KEY (fixture_id) REFERENCES fixtures(fixture_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS match_reports (
+      match_id INTEGER NOT NULL,
+      reporter_discord_id TEXT NOT NULL,
+      winner_side TEXT,
+      score_code INTEGER,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      PRIMARY KEY (match_id, reporter_discord_id),
+      FOREIGN KEY (match_id) REFERENCES matches(match_id)
     );
 
     CREATE TABLE IF NOT EXISTS results (

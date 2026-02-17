@@ -211,14 +211,27 @@ const commands = [
       .setDescription('Match ID')
       .setRequired(true))
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
-].map(c => c.toJSON());
+
+];
+
+const names = commands.map(c => c.name);
+const seen = new Set();
+for (const n of names) {
+  if (seen.has(n)) {
+    throw new Error(`Duplicate command name detected in deploy-commands.js: ${n}`);
+  }
+  seen.add(n);
+}
+
+const commandPayload = commands.map(c => c.toJSON());
+
 
 const rest = new REST({ version: '10' }).setToken(token);
 
 (async () => {
   try {
     console.log(`Deploying ${commands.length} commands to guild ${guildId}...`);
-    await rest.put(Routes.applicationGuildCommands(clientId, guildId), { body: commands });
+    await rest.put(Routes.applicationGuildCommands(clientId, guildId), { body: commandPayload });
     console.log('Done.');
   } catch (err) {
     console.error(err);
