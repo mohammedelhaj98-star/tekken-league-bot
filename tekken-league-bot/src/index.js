@@ -115,54 +115,14 @@ function buildStandingsMessage() {
   const completion = getCompletionStats(db, 1);
   const eligPct = db.prepare('SELECT eligibility_min_percent AS p FROM leagues WHERE league_id=1').get().p;
 
-  const rows = standings.slice(0, 20).map((s, idx) => {
+  const lines = standings.slice(0, 20).map((s, idx) => {
     const comp = completion.map.get(s.discord_user_id);
-    const completionPct = comp ? Math.round((comp.percent || 0) * 100) : 0;
     const eligible = (comp?.percent ?? 0) >= eligPct;
-
-    return {
-      rank: String(idx + 1),
-      player: s.tekken_tag,
-      pts: String(s.points),
-      w: String(s.wins),
-      l: String(s.losses),
-      diff: String(s.diff),
-      gw: String(s.games_won),
-      show: `${completionPct}%`,
-      elig: eligible ? 'Y' : 'N',
-    };
+    const completionPct = comp ? Math.round((comp.percent || 0) * 100) : 0;
+    return `${String(idx + 1).padStart(2, '0')}. ${s.tekken_tag} — ${s.points} pts | ${s.wins}-${s.losses} | diff ${s.diff} | GW ${s.games_won} | ${completionPct}%${eligible ? '' : ' (ineligible)'}`;
   });
 
-  const columns = [
-    { key: 'rank', title: '#' },
-    { key: 'player', title: 'PLAYER' },
-    { key: 'pts', title: 'PTS' },
-    { key: 'w', title: 'W' },
-    { key: 'l', title: 'L' },
-    { key: 'diff', title: 'DIFF' },
-    { key: 'gw', title: 'GW' },
-    { key: 'show', title: 'SHOW%' },
-    { key: 'elig', title: 'ELIG' },
-  ];
-
-  for (const col of columns) {
-    col.width = col.title.length;
-    for (const row of rows) {
-      col.width = Math.max(col.width, String(row[col.key]).length);
-    }
-  }
-
-  const formatRow = (obj) => columns.map((col) => {
-    const text = String(obj[col.key] ?? col.title);
-    return col.key === 'player' ? text.padEnd(col.width, ' ') : text.padStart(col.width, ' ');
-  }).join(' | ');
-
-  const header = formatRow(Object.fromEntries(columns.map(c => [c.key, c.title])));
-  const divider = columns.map(c => '-'.repeat(c.width)).join('-|-');
-  const body = rows.map(formatRow).join('\n');
-
-  const extra = standings.length > 20 ? `\nShowing top 20 of ${standings.length} players.` : '';
-  return `**Standings**\n\`\`\`\n${header}\n${divider}\n${body}\n\`\`\`${extra}`;
+  return `**Standings**\n${lines.join('\n')}`;
 }
 
 
@@ -816,24 +776,7 @@ ${lines.join('\n')}`, ephemeral: false });
             '• /queue — view current ready players',
             '• /standings or /table — view live standings table anytime',
             '• /mydata — view your private stored profile details',
-            'Admins: /admin_set_roles, /admin_list_roles, /admin_clear_roles, /admin_status, /admin_tournament_settings, /admin_setup_tournament, /admin_generate_fixtures, /admin_force_result, /admin_void_match, /admin_reset_league',
-          ].join('\n'),
-          ephemeral: true,
-        });
-        return;
-      }
-
-
-      if (name === 'helpplayer') {
-        await interaction.reply({
-          content: [
-            '**Player Help**',
-            '1) `/signup` to register your league details.',
-            '2) `/checkin` daily to count attendance.',
-            '3) `/ready` when you can play now, `/unready` when you cannot.',
-            '4) Use `/standings` or `/table` anytime for the league table.',
-            '5) Use `/queue` to see who is currently available.',
-            '6) Use `/mydata` to view your saved profile (private).',
+            'Admins: /admin_status, /admin_tournament_settings, /admin_setup_tournament, /admin_generate_fixtures, /admin_force_result, /admin_void_match, /admin_reset_league',
           ].join('\n'),
           ephemeral: true,
         });
@@ -848,66 +791,6 @@ ${lines.join('\n')}`, ephemeral: false });
         const r = generateDoubleRoundRobinFixtures(db, 1);
         logAudit('admin_generate_fixtures', interaction.user.id, { ok: r.ok, message: r.message });
         await interaction.reply({ content: r.message, ephemeral: true });
-        return;
-      }
-
-
-      if (name === 'admin_set_roles') {
-        if (!(interaction.memberPermissions?.has(PermissionsBitField.Flags.Administrator))) {
-          await interaction.reply({ content: 'Only Discord server administrators can change admin role mapping.', ephemeral: true });
-          return;
-        }
-
-        const roles = [
-          interaction.options.getRole('role_1', true),
-          interaction.options.getRole('role_2'),
-          interaction.options.getRole('role_3'),
-          interaction.options.getRole('role_4'),
-          interaction.options.getRole('role_5'),
-        ].filter(Boolean);
-
-        const uniqueRoleIds = [...new Set(roles.map(r => r.id))];
-        const tx = db.transaction((ids) => {
-          db.prepare('DELETE FROM admin_roles WHERE league_id = 1').run();
-          const ins = db.prepare('INSERT INTO admin_roles (league_id, role_id) VALUES (1, ?)');
-          for (const id of ids) ins.run(id);
-        });
-        tx(uniqueRoleIds);
-
-        logAudit('admin_set_roles', interaction.user.id, { role_ids: uniqueRoleIds });
-
-        await interaction.reply({
-          content: `Configured admin roles: ${uniqueRoleIds.map(id => `<@&${id}>`).join(', ')}`,
-          ephemeral: true,
-        });
-        return;
-      }
-
-      if (name === 'admin_list_roles') {
-        if (!isAdmin(interaction)) {
-          await interaction.reply({ content: 'Admin only.', ephemeral: true });
-          return;
-        }
-
-        const roleIds = getConfiguredAdminRoleIds();
-        const msg = roleIds.length
-          ? `Configured bot admin roles:
-${roleIds.map((id, i) => `${i + 1}. <@&${id}>`).join('\n')}`
-          : 'No bot-specific admin roles configured. Only users with Discord Administrator permission are treated as bot admins.';
-
-        await interaction.reply({ content: msg, ephemeral: true });
-        return;
-      }
-
-      if (name === 'admin_clear_roles') {
-        if (!(interaction.memberPermissions?.has(PermissionsBitField.Flags.Administrator))) {
-          await interaction.reply({ content: 'Only Discord server administrators can clear admin role mapping.', ephemeral: true });
-          return;
-        }
-
-        db.prepare('DELETE FROM admin_roles WHERE league_id = 1').run();
-        logAudit('admin_clear_roles', interaction.user.id);
-        await interaction.reply({ content: 'Cleared configured bot admin roles. Bot admin access now falls back to Discord Administrator permission only.', ephemeral: true });
         return;
       }
 

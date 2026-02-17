@@ -145,6 +145,18 @@ function initDb(db) {
     CREATE INDEX IF NOT EXISTS idx_admin_roles_league ON admin_roles (league_id);
   `);
 
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_players_league_status ON players (league_id, status);
+    CREATE INDEX IF NOT EXISTS idx_attendance_league_date ON attendance (league_id, date);
+    CREATE INDEX IF NOT EXISTS idx_fixtures_league_status ON fixtures (league_id, status);
+    CREATE INDEX IF NOT EXISTS idx_fixtures_players_status ON fixtures (league_id, player_a_discord_id, player_b_discord_id, status);
+    CREATE INDEX IF NOT EXISTS idx_pending_matches_fixture ON pending_matches (fixture_id);
+    CREATE INDEX IF NOT EXISTS idx_matches_fixture_state ON matches (fixture_id, state);
+    CREATE INDEX IF NOT EXISTS idx_matches_players_state ON matches (league_id, player_a_discord_id, player_b_discord_id, state);
+    CREATE INDEX IF NOT EXISTS idx_results_match_confirmed ON results (match_id, confirmed_at);
+    CREATE INDEX IF NOT EXISTS idx_audit_action_ts ON audit_log (league_id, action_type, ts);
+  `);
+
 
   function ensureColumn(tableName, columnName, ddl) {
     const cols = db.prepare(`PRAGMA table_info(${tableName})`).all();
