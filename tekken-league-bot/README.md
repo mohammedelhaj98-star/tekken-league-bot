@@ -4,7 +4,7 @@ This is a starter Discord bot (discord.js) that supports:
 - Player registration with required fields: **Real Name, Tekken Tag, Email, Phone**
 - Stores Discord identity automatically
 - Daily **/checkin** tracking (for your 15/20 rule)
-- Admin **/admin_generate_fixtures** to create a double round robin (2 legs) fixture list
+- Admin **/admin_generate_fixtures** to create missing double round robin fixtures (2 legs) without duplicating history
 - **/ready** queue matchmaking (simultaneous play)
 - Match acceptance handshake
 - BO5 result reporting + opponent confirmation

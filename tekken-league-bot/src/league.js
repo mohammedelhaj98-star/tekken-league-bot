@@ -1,5 +1,3 @@
-const { nanoid } = require('nanoid');
-
 // Points rules (per user spec)
 function pointsForPlayedMatch(winnerScore, loserScore) {
   // winnerScore is always 3, loserScore is 0..2
@@ -27,17 +25,32 @@ function calcMatchPoints({ score_a, score_b, winner_discord_id, player_a_discord
 }
 
 function generateDoubleRoundRobinFixtures(db, league_id = 1) {
-  const players = db.prepare(`SELECT discord_user_id FROM players WHERE league_id = ? AND status = 'active' ORDER BY discord_user_id`).all(league_id);
+  const players = db.prepare(`
+    SELECT discord_user_id
+    FROM players
+    WHERE league_id = ? AND status = 'active'
+    ORDER BY discord_user_id
+  `).all(league_id);
+
   if (players.length < 2) {
     return { ok: false, message: 'Need at least 2 signed-up players to generate fixtures.' };
   }
 
-  const existing = db.prepare('SELECT COUNT(1) AS c FROM fixtures WHERE league_id = ?').get(league_id).c;
-  if (existing > 0) {
-    return { ok: false, message: 'Fixtures already exist. Use /admin_reset_league if you really want to wipe and regenerate.' };
-  }
-
   const ids = players.map(p => p.discord_user_id);
+
+  // Keep full fixture history and only add missing pair/leg combinations.
+  const existing = db.prepare(`
+    SELECT player_a_discord_id, player_b_discord_id, leg_number
+    FROM fixtures
+    WHERE league_id = ?
+  `).all(league_id);
+
+  const existingKeys = new Set(existing.map((f) => {
+    const low = f.player_a_discord_id < f.player_b_discord_id ? f.player_a_discord_id : f.player_b_discord_id;
+    const high = f.player_a_discord_id < f.player_b_discord_id ? f.player_b_discord_id : f.player_a_discord_id;
+    return `${low}|${high}|${f.leg_number}`;
+  }));
+
   const insert = db.prepare(`
     INSERT INTO fixtures (league_id, player_a_discord_id, player_b_discord_id, leg_number)
     VALUES (?, ?, ?, ?)
@@ -49,16 +62,25 @@ function generateDoubleRoundRobinFixtures(db, league_id = 1) {
       for (let j = i + 1; j < ids.length; j++) {
         const a = ids[i];
         const b = ids[j];
-        insert.run(league_id, a, b, 1);
-        insert.run(league_id, a, b, 2);
-        count += 2;
+        for (const leg of [1, 2]) {
+          const key = `${a}|${b}|${leg}`;
+          if (existingKeys.has(key)) continue;
+          insert.run(league_id, a, b, leg);
+          existingKeys.add(key);
+          count += 1;
+        }
       }
     }
   });
   tx();
 
-  return { ok: true, message: `Generated ${count} fixtures (double round robin).` };
+  if (count === 0) {
+    return { ok: true, message: 'No new fixtures generated. All active player pairings already exist in fixture history.' };
+  }
+
+  return { ok: true, message: `Generated ${count} new fixtures (history preserved, no duplicate pair/leg).` };
 }
+
 
 function getTodayISO(qatarTime = true) {
   const now = new Date();

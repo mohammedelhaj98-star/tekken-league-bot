@@ -23,6 +23,7 @@ const { validateTournamentSetupInput } = require('./tournament-config');
 
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
 const MATCH_CHANNEL_ID = process.env.MATCH_CHANNEL_ID;
+const MATCHMAKER_INTERVAL_MS = Number(process.env.MATCHMAKER_INTERVAL_MS || 30000);
 
 if (!DISCORD_TOKEN) {
   console.error('Missing DISCORD_TOKEN in .env');
@@ -751,6 +752,21 @@ client.on(Events.MessageReactionAdd, async (reaction, user) => {
 
 client.once(Events.ClientReady, () => {
   console.log(`Logged in as ${client.user.tag}`);
+
+  if (!Number.isFinite(MATCHMAKER_INTERVAL_MS) || MATCHMAKER_INTERVAL_MS < 5000) {
+    console.warn(`Invalid MATCHMAKER_INTERVAL_MS=${MATCHMAKER_INTERVAL_MS}; defaulting to 30000ms.`);
+  }
+
+  const interval = Number.isFinite(MATCHMAKER_INTERVAL_MS) && MATCHMAKER_INTERVAL_MS >= 5000
+    ? MATCHMAKER_INTERVAL_MS
+    : 30000;
+
+  matchmakerTimer = setInterval(() => {
+    runMatchmakingTick().catch(() => null);
+  }, interval);
+
+  // Kick one immediate pass on startup.
+  runMatchmakingTick().catch(() => null);
 });
 
 client.on(Events.InteractionCreate, async (interaction) => {
