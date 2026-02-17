@@ -16,6 +16,18 @@ const commands = [
     .setDescription('Health check'),
 
   new SlashCommandBuilder()
+    .setName('help')
+    .setDescription('Show a quick guide to league commands'),
+
+  new SlashCommandBuilder()
+    .setName('helpplayer')
+    .setDescription('Show player-focused help and quick usage'),
+
+  new SlashCommandBuilder()
+    .setName('playerhelp')
+    .setDescription('Alias for /helpplayer'),
+
+  new SlashCommandBuilder()
     .setName('signup')
     .setDescription('Register for the league (Real name, Tekken tag, email, phone)'),
 
@@ -40,8 +52,118 @@ const commands = [
     .setDescription('Show current league standings'),
 
   new SlashCommandBuilder()
+    .setName('table')
+    .setDescription('Alias for /standings'),
+
+  new SlashCommandBuilder()
+    .setName('queue')
+    .setDescription('Show who is currently in the ready queue'),
+
+
+  new SlashCommandBuilder()
+    .setName('bot_settings')
+    .setDescription('Admin: view or update bot configuration')
+    .addSubcommand(sc => sc
+      .setName('view')
+      .setDescription('View current bot settings'))
+    .addSubcommand(sc => sc
+      .setName('set_results_channel')
+      .setDescription('Set channel for match assignments and results')
+      .addChannelOption(o => o.setName('channel').setDescription('Results channel').setRequired(true)))
+    .addSubcommand(sc => sc
+      .setName('set_admin_channel')
+      .setDescription('Set channel for dispute/admin alerts')
+      .addChannelOption(o => o.setName('channel').setDescription('Admin alerts channel').setRequired(true)))
+    .addSubcommand(sc => sc
+      .setName('set_match_format')
+      .setDescription('Set match format')
+      .addStringOption(o => o.setName('format').setDescription('Match format').setRequired(true).addChoices(
+        { name: 'FT2', value: 'FT2' },
+        { name: 'FT3', value: 'FT3' },
+      )))
+    .addSubcommand(sc => sc
+      .setName('set_tournament_name')
+      .setDescription('Set tournament name')
+      .addStringOption(o => o.setName('name').setDescription('Tournament name').setRequired(true).setMaxLength(100)))
+    .addSubcommand(sc => sc
+      .setName('set_timezone')
+      .setDescription('Set display timezone (IANA)')
+      .addStringOption(o => o.setName('tz').setDescription('Timezone, e.g. Asia/Qatar').setRequired(true).setMaxLength(80)))
+    .addSubcommand(sc => sc
+      .setName('set_standings_channel')
+      .setDescription('Set optional standings channel')
+      .addChannelOption(o => o.setName('channel').setDescription('Standings channel').setRequired(true)))
+    .addSubcommand(sc => sc
+      .setName('set_cleanup_policy')
+      .setDescription('Set message cleanup policy')
+      .addStringOption(o => o.setName('policy').setDescription('Policy').setRequired(true).addChoices(
+        { name: 'Keep forever', value: 'keep' },
+        { name: 'Archive after days', value: 'archive' },
+      ))
+      .addIntegerOption(o => o.setName('days').setDescription('Days for archive policy').setRequired(false)))
+    .addSubcommand(sc => sc
+      .setName('set_diagnostics')
+      .setDescription('Enable or disable diagnostics')
+      .addBooleanOption(o => o.setName('enabled').setDescription('Enable diagnostics').setRequired(true)))
+    .addSubcommand(sc => sc
+      .setName('set_allow_public_player_commands')
+      .setDescription('Set whether player commands are public by default')
+      .addBooleanOption(o => o.setName('enabled').setDescription('Enabled').setRequired(true)))
+    .addSubcommand(sc => sc
+      .setName('set_admin_roles')
+      .setDescription('Set which roles can access admin commands')
+      .addRoleOption(o => o.setName('role_1').setDescription('Admin role 1').setRequired(true))
+      .addRoleOption(o => o.setName('role_2').setDescription('Admin role 2').setRequired(false))
+      .addRoleOption(o => o.setName('role_3').setDescription('Admin role 3').setRequired(false))
+      .addRoleOption(o => o.setName('role_4').setDescription('Admin role 4').setRequired(false))
+      .addRoleOption(o => o.setName('role_5').setDescription('Admin role 5').setRequired(false)))
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
+  new SlashCommandBuilder()
     .setName('admin_generate_fixtures')
     .setDescription('Admin: generate double round robin fixtures for all signed-up players')
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
+
+
+  new SlashCommandBuilder()
+    .setName('admin_status')
+    .setDescription('Admin: quick snapshot of league health and queue state')
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
+
+  new SlashCommandBuilder()
+    .setName('admin_setup_tournament')
+    .setDescription('Admin: configure tournament settings for this league')
+    .addIntegerOption(o => o
+      .setName('max_players')
+      .setDescription('Maximum players (2-1024)')
+      .setRequired(false))
+    .addIntegerOption(o => o
+      .setName('timeslot_count')
+      .setDescription('No. of timeslots per day (1-24)')
+      .setRequired(false))
+    .addIntegerOption(o => o
+      .setName('timeslot_duration_minutes')
+      .setDescription('Duration of each timeslot in minutes (15-1440)')
+      .setRequired(false))
+    .addStringOption(o => o
+      .setName('timeslot_starts')
+      .setDescription('Comma-separated start times in 24h format, e.g. 18:00,20:00')
+      .setRequired(false))
+    .addIntegerOption(o => o
+      .setName('total_tournament_days')
+      .setDescription('Total tournament days (1-365)')
+      .setRequired(false))
+    .addNumberOption(o => o
+      .setName('minimum_showup_percent')
+      .setDescription('Minimum show-up percentage required (0-100)')
+      .setRequired(false))
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
+  new SlashCommandBuilder()
+    .setName('admin_tournament_settings')
+    .setDescription('Admin: view current tournament setup settings')
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 
   new SlashCommandBuilder()
@@ -83,14 +205,27 @@ const commands = [
       .setDescription('Match ID')
       .setRequired(true))
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
-].map(c => c.toJSON());
+
+];
+
+const names = commands.map(c => c.toJSON().name);
+const seen = new Set();
+for (const n of names) {
+  if (seen.has(n)) {
+    throw new Error(`Duplicate command name detected in deploy-commands.js: ${n}`);
+  }
+  seen.add(n);
+}
+
+const commandPayload = commands.map(c => c.toJSON());
+
 
 const rest = new REST({ version: '10' }).setToken(token);
 
 (async () => {
   try {
     console.log(`Deploying ${commands.length} commands to guild ${guildId}...`);
-    await rest.put(Routes.applicationGuildCommands(clientId, guildId), { body: commands });
+    await rest.put(Routes.applicationGuildCommands(clientId, guildId), { body: commandPayload });
     console.log('Done.');
   } catch (err) {
     console.error(err);
