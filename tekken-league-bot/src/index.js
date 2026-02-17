@@ -16,8 +16,9 @@ const {
 
 const { openDb, initDb } = require('./db');
 const { encryptString, decryptString, maskEmail, maskPhone } = require('./crypto');
-const { isValidEmail, isValidPhone, cleanTekkenTag, cleanName } = require('./validate');
+const { isValidEmail, isValidPhone, normalizeEmail, normalizePhone, cleanTekkenTag, cleanName } = require('./validate');
 const { generateDoubleRoundRobinFixtures, computeStandings, getCompletionStats, getTodayISO } = require('./league');
+const { validateTournamentSetupInput } = require('./tournament-config');
 
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
 const MATCH_CHANNEL_ID = process.env.MATCH_CHANNEL_ID;
@@ -38,8 +39,31 @@ const client = new Client({
   intents: [GatewayIntentBits.Guilds],
 });
 
+function getConfiguredAdminRoleIds() {
+  return db.prepare('SELECT role_id FROM admin_roles WHERE league_id = 1 ORDER BY role_id ASC').all().map(r => r.role_id);
+}
+
+function getInteractionRoleIds(interaction) {
+  const memberRoles = interaction.member?.roles;
+  if (!memberRoles) return [];
+
+  if (Array.isArray(memberRoles)) return memberRoles;
+
+  if (memberRoles.cache && typeof memberRoles.cache.values === 'function') {
+    return Array.from(memberRoles.cache.values()).map(role => role.id);
+  }
+
+  return [];
+}
+
 function isAdmin(interaction) {
-  return interaction.memberPermissions?.has(PermissionsBitField.Flags.Administrator) ?? false;
+  if (interaction.memberPermissions?.has(PermissionsBitField.Flags.Administrator)) return true;
+
+  const configured = getConfiguredAdminRoleIds();
+  if (!configured.length) return false;
+
+  const roleIds = getInteractionRoleIds(interaction);
+  return roleIds.some(id => configured.includes(id));
 }
 
 function getDisplayNameFromInteraction(interaction) {
@@ -65,6 +89,117 @@ function getPlayer(discord_user_id) {
 function ensureSignedUp(interaction) {
   const p = getPlayer(interaction.user.id);
   return p;
+}
+
+function logAudit(actionType, actorDiscordId, payload = null) {
+  db.prepare(`
+    INSERT INTO audit_log (league_id, actor_discord_id, action_type, payload_json)
+    VALUES (1, ?, ?, ?)
+  `).run(actorDiscordId || null, actionType, payload ? JSON.stringify(payload) : null);
+}
+
+function getReadyQueueSnapshot() {
+  return db.prepare(`
+    SELECT p.tekken_tag, rq.discord_user_id, rq.since_ts
+    FROM ready_queue rq
+    LEFT JOIN players p ON p.league_id = rq.league_id AND p.discord_user_id = rq.discord_user_id
+    WHERE rq.league_id = 1
+    ORDER BY rq.since_ts ASC
+  `).all();
+}
+
+function buildStandingsMessage() {
+  const standings = computeStandings(db, 1);
+  if (!standings.length) return '**Standings**\nNo active players yet. Use /signup to join the league.';
+
+  const completion = getCompletionStats(db, 1);
+  const eligPct = db.prepare('SELECT eligibility_min_percent AS p FROM leagues WHERE league_id=1').get().p;
+
+  const rows = standings.slice(0, 20).map((s, idx) => {
+    const comp = completion.map.get(s.discord_user_id);
+    const completionPct = comp ? Math.round((comp.percent || 0) * 100) : 0;
+    const eligible = (comp?.percent ?? 0) >= eligPct;
+
+    return {
+      rank: String(idx + 1),
+      player: s.tekken_tag,
+      pts: String(s.points),
+      w: String(s.wins),
+      l: String(s.losses),
+      diff: String(s.diff),
+      gw: String(s.games_won),
+      show: `${completionPct}%`,
+      elig: eligible ? 'Y' : 'N',
+    };
+  });
+
+  const columns = [
+    { key: 'rank', title: '#' },
+    { key: 'player', title: 'PLAYER' },
+    { key: 'pts', title: 'PTS' },
+    { key: 'w', title: 'W' },
+    { key: 'l', title: 'L' },
+    { key: 'diff', title: 'DIFF' },
+    { key: 'gw', title: 'GW' },
+    { key: 'show', title: 'SHOW%' },
+    { key: 'elig', title: 'ELIG' },
+  ];
+
+  for (const col of columns) {
+    col.width = col.title.length;
+    for (const row of rows) {
+      col.width = Math.max(col.width, String(row[col.key]).length);
+    }
+  }
+
+  const formatRow = (obj) => columns.map((col) => {
+    const text = String(obj[col.key] ?? col.title);
+    return col.key === 'player' ? text.padEnd(col.width, ' ') : text.padStart(col.width, ' ');
+  }).join(' | ');
+
+  const header = formatRow(Object.fromEntries(columns.map(c => [c.key, c.title])));
+  const divider = columns.map(c => '-'.repeat(c.width)).join('-|-');
+  const body = rows.map(formatRow).join('\n');
+
+  const extra = standings.length > 20 ? `\nShowing top 20 of ${standings.length} players.` : '';
+  return `**Standings**\n\`\`\`\n${header}\n${divider}\n${body}\n\`\`\`${extra}`;
+}
+
+
+function getLeagueSettings() {
+  return db.prepare(`
+    SELECT
+      name,
+      timezone,
+      season_days,
+      attendance_min_days,
+      eligibility_min_percent,
+      max_players,
+      timeslot_count,
+      timeslot_duration_minutes,
+      timeslot_starts
+    FROM leagues
+    WHERE league_id = 1
+  `).get();
+}
+
+function buildTournamentSettingsMessage() {
+  const s = getLeagueSettings();
+  const minShowupPercent = Math.round((s.eligibility_min_percent || 0) * 100);
+  const minAttendanceDays = Math.ceil((s.season_days || 0) * (s.eligibility_min_percent || 0));
+
+  return [
+    '**Tournament Settings**',
+    `League: ${s.name}`,
+    `Timezone: ${s.timezone}`,
+    `No. of Players (max): ${s.max_players}`,
+    `No. of Timeslots: ${s.timeslot_count}`,
+    `Duration of Time slots: ${s.timeslot_duration_minutes} minutes`,
+    `Start of each time slot: ${s.timeslot_starts}`,
+    `Total tournament days: ${s.season_days}`,
+    `Minimum show up %: ${minShowupPercent}%`,
+    `Minimum check-in days required: ${minAttendanceDays}`,
+  ].join('\n');
 }
 
 function hasCheckedInToday(discord_user_id) {
@@ -614,6 +749,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
           VALUES (1, ?, ?, 1)
         `).run(interaction.user.id, today);
 
+        logAudit('checkin', interaction.user.id, { date: today });
         await interaction.reply({ content: `Checked in for ${today}.`, ephemeral: true });
         return;
       }
@@ -636,6 +772,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         }
 
         addToReadyQueue(interaction.user.id);
+        logAudit('queue_join', interaction.user.id);
         await interaction.reply({ content: 'You are in the queue. Waiting for an opponent...', ephemeral: true });
         await tryMatchmake(interaction.guild);
         return;
@@ -643,24 +780,62 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
       if (name === 'unready') {
         removeFromReadyQueue(interaction.user.id);
+        logAudit('queue_leave', interaction.user.id);
         await interaction.reply({ content: 'Removed from queue.', ephemeral: true });
         return;
       }
 
-      if (name === 'standings') {
-        const standings = computeStandings(db, 1);
-        const completion = getCompletionStats(db, 1);
-        const eligPct = db.prepare('SELECT eligibility_min_percent AS p FROM leagues WHERE league_id=1').get().p;
-
-        const lines = standings.slice(0, 20).map((s, idx) => {
-          const comp = completion.map.get(s.discord_user_id);
-          const eligible = (comp?.percent ?? 0) >= eligPct;
-          return `${String(idx + 1).padStart(2, '0')}. ${s.tekken_tag} — ${s.points} pts | ${s.wins}-${s.losses} | diff ${s.diff} | GW ${s.games_won}${eligible ? '' : ' (ineligible)'}`;
-        });
-
+      if (name === 'standings' || name === 'table') {
         await interaction.reply({
-          content: `**Standings**\n${lines.join('\n')}`,
+          content: buildStandingsMessage(),
           ephemeral: false,
+        });
+        return;
+      }
+
+      if (name === 'queue') {
+        const queue = getReadyQueueSnapshot();
+        if (!queue.length) {
+          await interaction.reply({ content: 'Ready queue is currently empty.', ephemeral: false });
+          return;
+        }
+
+        const lines = queue.map((row, idx) => `${idx + 1}. ${row.tekken_tag || row.discord_user_id} (<@${row.discord_user_id}>)`);
+        await interaction.reply({ content: `**Ready Queue (${queue.length})**
+${lines.join('\n')}`, ephemeral: false });
+        return;
+      }
+
+      if (name === 'help') {
+        await interaction.reply({
+          content: [
+            '**League Bot Quick Help**',
+            '• /signup — register or update your league profile',
+            "• /checkin — mark today's availability (attendance requirement)",
+            '• /ready and /unready — join/leave live matchmaking queue',
+            '• /queue — view current ready players',
+            '• /standings or /table — view live standings table anytime',
+            '• /mydata — view your private stored profile details',
+            'Admins: /admin_set_roles, /admin_list_roles, /admin_clear_roles, /admin_status, /admin_tournament_settings, /admin_setup_tournament, /admin_generate_fixtures, /admin_force_result, /admin_void_match, /admin_reset_league',
+          ].join('\n'),
+          ephemeral: true,
+        });
+        return;
+      }
+
+
+      if (name === 'helpplayer') {
+        await interaction.reply({
+          content: [
+            '**Player Help**',
+            '1) `/signup` to register your league details.',
+            '2) `/checkin` daily to count attendance.',
+            '3) `/ready` when you can play now, `/unready` when you cannot.',
+            '4) Use `/standings` or `/table` anytime for the league table.',
+            '5) Use `/queue` to see who is currently available.',
+            '6) Use `/mydata` to view your saved profile (private).',
+          ].join('\n'),
+          ephemeral: true,
         });
         return;
       }
@@ -671,7 +846,196 @@ client.on(Events.InteractionCreate, async (interaction) => {
           return;
         }
         const r = generateDoubleRoundRobinFixtures(db, 1);
+        logAudit('admin_generate_fixtures', interaction.user.id, { ok: r.ok, message: r.message });
         await interaction.reply({ content: r.message, ephemeral: true });
+        return;
+      }
+
+
+      if (name === 'admin_set_roles') {
+        if (!(interaction.memberPermissions?.has(PermissionsBitField.Flags.Administrator))) {
+          await interaction.reply({ content: 'Only Discord server administrators can change admin role mapping.', ephemeral: true });
+          return;
+        }
+
+        const roles = [
+          interaction.options.getRole('role_1', true),
+          interaction.options.getRole('role_2'),
+          interaction.options.getRole('role_3'),
+          interaction.options.getRole('role_4'),
+          interaction.options.getRole('role_5'),
+        ].filter(Boolean);
+
+        const uniqueRoleIds = [...new Set(roles.map(r => r.id))];
+        const tx = db.transaction((ids) => {
+          db.prepare('DELETE FROM admin_roles WHERE league_id = 1').run();
+          const ins = db.prepare('INSERT INTO admin_roles (league_id, role_id) VALUES (1, ?)');
+          for (const id of ids) ins.run(id);
+        });
+        tx(uniqueRoleIds);
+
+        logAudit('admin_set_roles', interaction.user.id, { role_ids: uniqueRoleIds });
+
+        await interaction.reply({
+          content: `Configured admin roles: ${uniqueRoleIds.map(id => `<@&${id}>`).join(', ')}`,
+          ephemeral: true,
+        });
+        return;
+      }
+
+      if (name === 'admin_list_roles') {
+        if (!isAdmin(interaction)) {
+          await interaction.reply({ content: 'Admin only.', ephemeral: true });
+          return;
+        }
+
+        const roleIds = getConfiguredAdminRoleIds();
+        const msg = roleIds.length
+          ? `Configured bot admin roles:
+${roleIds.map((id, i) => `${i + 1}. <@&${id}>`).join('\n')}`
+          : 'No bot-specific admin roles configured. Only users with Discord Administrator permission are treated as bot admins.';
+
+        await interaction.reply({ content: msg, ephemeral: true });
+        return;
+      }
+
+      if (name === 'admin_clear_roles') {
+        if (!(interaction.memberPermissions?.has(PermissionsBitField.Flags.Administrator))) {
+          await interaction.reply({ content: 'Only Discord server administrators can clear admin role mapping.', ephemeral: true });
+          return;
+        }
+
+        db.prepare('DELETE FROM admin_roles WHERE league_id = 1').run();
+        logAudit('admin_clear_roles', interaction.user.id);
+        await interaction.reply({ content: 'Cleared configured bot admin roles. Bot admin access now falls back to Discord Administrator permission only.', ephemeral: true });
+        return;
+      }
+
+      if (name === 'admin_status') {
+        if (!isAdmin(interaction)) {
+          await interaction.reply({ content: 'Admin only.', ephemeral: true });
+          return;
+        }
+
+        const players = db.prepare("SELECT COUNT(1) AS c FROM players WHERE league_id = 1 AND status = 'active'").get().c;
+        const fixtures = db.prepare("SELECT COUNT(1) AS c FROM fixtures WHERE league_id = 1").get().c;
+        const confirmedFixtures = db.prepare("SELECT COUNT(1) AS c FROM fixtures WHERE league_id = 1 AND status = 'confirmed'").get().c;
+        const queueCount = db.prepare('SELECT COUNT(1) AS c FROM ready_queue WHERE league_id = 1').get().c;
+        const activeMatches = db.prepare("SELECT COUNT(1) AS c FROM matches WHERE league_id = 1 AND state IN ('pending_accept','active','awaiting_confirmation','disputed')").get().c;
+
+        await interaction.reply({
+          content: [
+            '**League Admin Status**',
+            `Players (active): ${players}`,
+            `Fixtures: ${fixtures} total / ${confirmedFixtures} confirmed`,
+            `Ready queue: ${queueCount}`,
+            `Open matches: ${activeMatches}`,
+          ].join('\n'),
+          ephemeral: true,
+        });
+        return;
+      }
+
+
+      if (name === 'admin_tournament_settings') {
+        if (!isAdmin(interaction)) {
+          await interaction.reply({ content: 'Admin only.', ephemeral: true });
+          return;
+        }
+
+        await interaction.reply({ content: buildTournamentSettingsMessage(), ephemeral: true });
+        return;
+      }
+
+      if (name === 'admin_setup_tournament') {
+        if (!isAdmin(interaction)) {
+          await interaction.reply({ content: 'Admin only.', ephemeral: true });
+          return;
+        }
+
+        const maxPlayers = interaction.options.getInteger('max_players');
+        const timeslotCount = interaction.options.getInteger('timeslot_count');
+        const timeslotDurationMinutes = interaction.options.getInteger('timeslot_duration_minutes');
+        const timeSlotStartsRaw = interaction.options.getString('timeslot_starts');
+        const totalTournamentDays = interaction.options.getInteger('total_tournament_days');
+        const minimumShowupPercent = interaction.options.getNumber('minimum_showup_percent');
+
+        const hasAnyUpdate = [maxPlayers, timeslotCount, timeslotDurationMinutes, timeSlotStartsRaw, totalTournamentDays, minimumShowupPercent]
+          .some(v => v !== null && v !== undefined);
+        if (!hasAnyUpdate) {
+          await interaction.reply({
+            content: `No values supplied.
+${buildTournamentSettingsMessage()}`,
+            ephemeral: true,
+          });
+          return;
+        }
+
+        const validated = validateTournamentSetupInput({
+          maxPlayers,
+          timeslotCount,
+          timeslotDurationMinutes,
+          timeSlotStartsRaw,
+          totalTournamentDays,
+          minimumShowupPercent,
+        });
+
+        if (!validated.ok) {
+          await interaction.reply({ content: validated.error, ephemeral: true });
+          return;
+        }
+
+        const current = getLeagueSettings();
+        const merged = {
+          max_players: validated.values.max_players ?? current.max_players,
+          timeslot_count: validated.values.timeslot_count ?? current.timeslot_count,
+          timeslot_duration_minutes: validated.values.timeslot_duration_minutes ?? current.timeslot_duration_minutes,
+          timeslot_starts: validated.values.timeslot_starts ?? current.timeslot_starts,
+          season_days: validated.values.season_days ?? current.season_days,
+          eligibility_min_percent: validated.values.eligibility_min_percent ?? current.eligibility_min_percent,
+        };
+
+        if (merged.timeslot_starts.split(',').length !== merged.timeslot_count) {
+          await interaction.reply({
+            content: `No. of timeslots (${merged.timeslot_count}) must match start times count (${merged.timeslot_starts.split(',').length}).`,
+            ephemeral: true,
+          });
+          return;
+        }
+
+        const minAttendanceDays = Math.ceil(merged.season_days * merged.eligibility_min_percent);
+
+        db.prepare(`
+          UPDATE leagues
+          SET
+            max_players = ?,
+            timeslot_count = ?,
+            timeslot_duration_minutes = ?,
+            timeslot_starts = ?,
+            season_days = ?,
+            eligibility_min_percent = ?,
+            attendance_min_days = ?
+          WHERE league_id = 1
+        `).run(
+          merged.max_players,
+          merged.timeslot_count,
+          merged.timeslot_duration_minutes,
+          merged.timeslot_starts,
+          merged.season_days,
+          merged.eligibility_min_percent,
+          minAttendanceDays,
+        );
+
+        logAudit('admin_setup_tournament', interaction.user.id, {
+          updated: validated.values,
+          computed_attendance_min_days: minAttendanceDays,
+        });
+
+        await interaction.reply({
+          content: `Tournament settings updated.
+${buildTournamentSettingsMessage()}`,
+          ephemeral: true,
+        });
         return;
       }
 
@@ -689,6 +1053,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
           DELETE FROM ready_queue;
           DELETE FROM attendance;
         `);
+        logAudit('admin_reset_league', interaction.user.id);
         await interaction.reply({ content: 'League data reset (players preserved).', ephemeral: true });
         return;
       }
@@ -753,6 +1118,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         db.prepare(`UPDATE matches SET state = 'confirmed', ended_at = datetime('now') WHERE match_id = ?`).run(matchId);
         db.prepare(`UPDATE fixtures SET status = 'confirmed', confirmed_at = datetime('now') WHERE fixture_id = ?`).run(match.fixture_id);
 
+        logAudit('admin_force_result', interaction.user.id, { matchId, winner: winnerUser.id, scoreA, scoreB, isForfeit, resultId: Number(ins.lastInsertRowid) });
         await interaction.reply({
           content: `Forced result recorded: <@${winnerUser.id}> wins ${scoreA}-${scoreB}${isForfeit ? ' (FORFEIT)' : ''}. (result_id=${ins.lastInsertRowid})`,
           ephemeral: true,
@@ -777,6 +1143,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         db.prepare('DELETE FROM results WHERE match_id = ?').run(matchId);
         db.prepare("UPDATE fixtures SET status = 'unplayed', confirmed_at = NULL WHERE fixture_id = ?").run(match.fixture_id);
         db.prepare("UPDATE matches SET state = 'cancelled', ended_at = datetime('now') WHERE match_id = ?").run(matchId);
+        logAudit('admin_void_match', interaction.user.id, { matchId });
 
         await interaction.reply({ content: `Match ${matchId} voided and fixture reopened.`, ephemeral: true });
         return;
@@ -787,8 +1154,13 @@ client.on(Events.InteractionCreate, async (interaction) => {
       if (interaction.customId === 'signup_modal') {
         const realName = cleanName(interaction.fields.getTextInputValue('real_name'));
         const tekkenTag = cleanTekkenTag(interaction.fields.getTextInputValue('tekken_tag'));
-        const email = interaction.fields.getTextInputValue('email').trim();
-        const phone = interaction.fields.getTextInputValue('phone').trim();
+        const email = normalizeEmail(interaction.fields.getTextInputValue('email'));
+        const phone = normalizePhone(interaction.fields.getTextInputValue('phone'));
+
+        if (!realName || !tekkenTag) {
+          await interaction.reply({ content: 'Real name and Tekken tag are required.', ephemeral: true });
+          return;
+        }
 
         if (!isValidEmail(email)) {
           await interaction.reply({ content: 'Invalid email format.', ephemeral: true });
@@ -840,6 +1212,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
           );
         }
 
+        logAudit('signup_upsert', interaction.user.id, { tekkenTag });
         await interaction.reply({
           content: 'Signup saved. Use /checkin daily and /ready when you are free to play.',
           ephemeral: true,
@@ -983,5 +1356,19 @@ client.on(Events.InteractionCreate, async (interaction) => {
     }
   }
 });
+
+
+function shutdown(signal) {
+  console.log(`${signal} received, shutting down gracefully...`);
+  try {
+    db.close();
+  } catch (err) {
+    console.error('Failed to close database cleanly:', err);
+  }
+  process.exit(0);
+}
+
+process.on('SIGINT', () => shutdown('SIGINT'));
+process.on('SIGTERM', () => shutdown('SIGTERM'));
 
 client.login(DISCORD_TOKEN);

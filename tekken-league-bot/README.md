@@ -14,7 +14,7 @@ This is a starter Discord bot (discord.js) that supports:
 - Node.js **22.12+**
 
 ## Quick start
-1) Copy `.env.example` to `.env` and fill the values.
+1) Copy `.env.example` to `.env` and fill the values (token, app/guild IDs, match channel, encryption key).
 2) Install dependencies:
 
 ```bash
@@ -41,10 +41,38 @@ Players:
 - /ready
 - /unready
 - /standings
+- /table
+- /queue
+- /help
+- /helpplayer
 
 Admins (requires Administrator permission in the server):
+- /admin_set_roles
+- /admin_list_roles
+- /admin_clear_roles
+- /admin_status
+- /admin_tournament_settings
+- /admin_setup_tournament
 - /admin_generate_fixtures
 - /admin_reset_league (dangerous)
  - /admin_force_result
  - /admin_void_match
 
+
+## Testing
+Run unit tests with:
+
+```bash
+npm test
+```
+
+## Tournament setup
+Use `/admin_setup_tournament` to configure the league before generating fixtures. You can set:
+- max players
+- number of timeslots
+- duration of each timeslot
+- start times of each timeslot (comma-separated HH:MM, 24h)
+- total tournament days
+- minimum show-up %
+
+Use `/admin_tournament_settings` any time to review the current configuration.
