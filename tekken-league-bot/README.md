@@ -43,6 +43,8 @@ Players:
 - /standings
 - /table
 - /queue
+- /left (sent via DM)
+- /matches
 - /help
 - /helpplayer
 - /playerhelp
@@ -50,12 +52,15 @@ Players:
 Admins (requires Administrator permission in the server):
 - /bot_settings
 - /admin_status
+- /admin_player_matches
+- /admin_player_left
 - /admin_tournament_settings
 - /admin_setup_tournament
 - /admin_generate_fixtures
 - /admin_reset_league (dangerous)
  - /admin_force_result
  - /admin_void_match
+ - /admin_dispute_match
 
 
 ## Testing
@@ -79,12 +84,15 @@ Use `/admin_tournament_settings` any time to review the current configuration.
 ## Public-by-default behavior
 Player-facing commands respond in-channel by default (no DMs).
 Match assignments and result workflows are posted publicly in the configured results channel (set via `/bot_settings set_results_channel`).
+Dispute notifications can be routed to a dedicated channel via `/bot_settings set_dispute_channel`.
 
 
 ## Fixture history and notifications
 - You can run `/admin_generate_fixtures` repeatedly; it only adds missing pair/leg fixtures and keeps full history.
 - Confirmed matches are immutable for players and only changeable by admins via admin commands.
+- Admins can override match outcomes directly from the match message by reacting 🇦/🇧. If that admin reaction is removed, player report consensus is restored.
 - When a match is created, it is posted publicly in the results channel and each player also receives a DM reminder with the fixture details.
+- After a confirmed match, both players can react 🔁 to immediately start their second-leg rematch if available (no re-queue needed).
 
 
 ## Automatic queue matching

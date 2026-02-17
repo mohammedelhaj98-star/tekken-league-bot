@@ -62,6 +62,19 @@ function getInteractionRoleIds(interaction) {
   return [];
 }
 
+function isAdminMember(member, guildId) {
+  if (member?.permissions?.has(PermissionsBitField.Flags.Administrator)) return true;
+
+  const configured = getConfiguredAdminRoleIds(guildId);
+  if (!configured.length) return false;
+
+  const roleIds = member?.roles?.cache
+    ? Array.from(member.roles.cache.values()).map((role) => role.id)
+    : [];
+
+  return roleIds.some((id) => configured.includes(id));
+}
+
 function isAdmin(interaction) {
   if (interaction.memberPermissions?.has(PermissionsBitField.Flags.Administrator)) return true;
 
@@ -131,6 +144,7 @@ function updateGuildSetting(guildId, patch) {
       results_channel_id = ?,
       admin_channel_id = ?,
       standings_channel_id = ?,
+      dispute_channel_id = ?,
       match_format = ?,
       allow_public_player_commands = ?,
       tournament_name = ?,
@@ -144,6 +158,7 @@ function updateGuildSetting(guildId, patch) {
     merged.results_channel_id || null,
     merged.admin_channel_id || null,
     merged.standings_channel_id || null,
+    merged.dispute_channel_id || null,
     merged.match_format || 'FT3',
     merged.allow_public_player_commands ? 1 : 0,
     merged.tournament_name || 'Tekken League',
@@ -157,6 +172,19 @@ function updateGuildSetting(guildId, patch) {
 
 function getScoreReactionsForFormat(format) {
   return format === 'FT2' ? ['0️⃣', '1️⃣'] : ['0️⃣', '1️⃣', '2️⃣'];
+}
+
+
+function getDisputeNotificationChannelId(settings) {
+  return settings.dispute_channel_id || settings.admin_channel_id || null;
+}
+
+async function sendDisputeNotification(guild, settings, content) {
+  const channelId = getDisputeNotificationChannelId(settings);
+  if (!channelId) return;
+  const channel = await guild.channels.fetch(channelId).catch(() => null);
+  if (!channel || !channel.isTextBased()) return;
+  await channel.send({ content }).catch(() => null);
 }
 
 function scoreFromCode(format, code) {
@@ -196,6 +224,111 @@ function getReadyQueueSnapshot() {
     WHERE rq.league_id = 1
     ORDER BY rq.since_ts ASC
   `).all();
+}
+
+
+function buildMatchesMessage(limit = 30, discordUserId = null) {
+  const rows = discordUserId
+    ? db.prepare(`
+      SELECT
+        m.match_id,
+        m.player_a_discord_id,
+        m.player_b_discord_id,
+        m.state,
+        r.score_a,
+        r.score_b,
+        r.confirmed_at
+      FROM matches m
+      LEFT JOIN results r ON r.match_id = m.match_id AND r.confirmed_at IS NOT NULL
+      WHERE m.league_id = 1
+        AND (m.player_a_discord_id = ? OR m.player_b_discord_id = ?)
+      ORDER BY m.match_id DESC
+      LIMIT ?
+    `).all(discordUserId, discordUserId, limit)
+    : db.prepare(`
+      SELECT
+        m.match_id,
+        m.player_a_discord_id,
+        m.player_b_discord_id,
+        m.state,
+        r.score_a,
+        r.score_b,
+        r.confirmed_at
+      FROM matches m
+      LEFT JOIN results r ON r.match_id = m.match_id AND r.confirmed_at IS NOT NULL
+      WHERE m.league_id = 1
+      ORDER BY m.match_id DESC
+      LIMIT ?
+    `).all(limit);
+
+  if (!rows.length) {
+    return discordUserId
+      ? `No matches found yet for <@${discordUserId}>.`
+      : 'No matches created yet.';
+  }
+
+  const lines = rows.map((m) => {
+    const score = (m.score_a == null || m.score_b == null) ? '-' : `${m.score_a}-${m.score_b}`;
+    return `#${m.match_id} | <@${m.player_a_discord_id}> vs <@${m.player_b_discord_id}> | ${m.state} | score: ${score}`;
+  });
+
+  const title = discordUserId
+    ? `**Matches for <@${discordUserId}> (latest ${rows.length})**`
+    : `**Recent Matches (latest ${rows.length})**`;
+
+  return `${title}\n${lines.join('\n')}`;
+}
+
+function buildLeftToPlayMessage(discordUserId) {
+  const standings = computeStandings(db, 1);
+  const rankById = new Map(standings.map((row, idx) => [row.discord_user_id, idx + 1]));
+
+  const rows = db.prepare(`
+    SELECT
+      CASE
+        WHEN f.player_a_discord_id = ? THEN f.player_b_discord_id
+        ELSE f.player_a_discord_id
+      END AS opponent_id,
+      p.tekken_tag AS opponent_tag,
+      COUNT(1) AS matches_left
+    FROM fixtures f
+    LEFT JOIN players p
+      ON p.league_id = f.league_id
+      AND p.discord_user_id = CASE
+        WHEN f.player_a_discord_id = ? THEN f.player_b_discord_id
+        ELSE f.player_a_discord_id
+      END
+    WHERE f.league_id = 1
+      AND (f.player_a_discord_id = ? OR f.player_b_discord_id = ?)
+      AND f.status IN ('unplayed', 'locked_in_match')
+    GROUP BY opponent_id, opponent_tag
+  `).all(discordUserId, discordUserId, discordUserId, discordUserId);
+
+  if (!rows.length) {
+    return '**Left to Play**\nYou have completed all scheduled matches.';
+  }
+
+  const sorted = rows
+    .map((row) => ({
+      opponentId: row.opponent_id,
+      opponentTag: row.opponent_tag || row.opponent_id,
+      matchesLeft: Number(row.matches_left || 0),
+      standingsRank: rankById.get(row.opponent_id) || Number.MAX_SAFE_INTEGER,
+    }))
+    .sort((a, b) => {
+      if (b.matchesLeft !== a.matchesLeft) return b.matchesLeft - a.matchesLeft;
+      if (a.standingsRank !== b.standingsRank) return a.standingsRank - b.standingsRank;
+      return a.opponentTag.localeCompare(b.opponentTag, undefined, { sensitivity: 'base' });
+    });
+
+  const lines = sorted.map((row, idx) => {
+    const rankText = Number.isFinite(row.standingsRank) && row.standingsRank !== Number.MAX_SAFE_INTEGER
+      ? `#${row.standingsRank}`
+      : 'N/A';
+    return `${idx + 1}. ${row.opponentTag} (<@${row.opponentId}>) — ${row.matchesLeft} left (standings ${rankText})`;
+  });
+
+  return `**Left to Play**\n${lines.join('\n')}`;
 }
 
 function buildStandingsListMessage() {
@@ -586,7 +719,7 @@ async function handleReportModalSubmit(interaction, matchId) {
   // Post confirmation request in thread
   const thread = interaction.channel;
   await thread.send({
-    content: `Result reported: **<@${winnerId}> wins ${scoreA}-${scoreB}**\nOpponent <@${opponentId}>: please **Confirm** or **Dispute**.`,
+    content: `Match ${matchId}\nResult reported: **<@${winnerId}> wins ${scoreA}-${scoreB}**\nOpponent <@${opponentId}>: please **Confirm** or **Dispute**.`,
     components: [row],
     allowed_mentions: { users: [opponentId], roles: [], replied_user: false },
   });
@@ -632,7 +765,7 @@ async function handleForfeitClaim(interaction, matchId) {
   await interaction.reply({ content: 'Forfeit claimed. Waiting for opponent confirmation.', ephemeral: true });
 
   await interaction.channel.send({
-    content: `Forfeit claimed by <@${winnerId}>. If confirmed, it will be recorded as **3-0** and **3 points** for the winner.\nOpponent <@${opponentId}>: confirm or dispute.`,
+    content: `Match ${matchId}\nForfeit claimed by <@${winnerId}>. If confirmed, it will be recorded as **3-0** and **3 points** for the winner.\nOpponent <@${opponentId}>: confirm or dispute.`,
     components: [row],
     allowed_mentions: { users: [opponentId], roles: [], replied_user: false },
   });
@@ -668,7 +801,9 @@ async function finalizeResult(interaction, resultId, action) {
 
   if (action === 'dispute') {
     db.prepare(`UPDATE matches SET state = 'disputed' WHERE match_id = ?`).run(result.match_id);
-    await interaction.reply({ content: 'Marked as disputed. An organizer will review.', ephemeral: true });
+    const settings = getGuildSettings(interaction.guildId);
+    await sendDisputeNotification(interaction.guild, settings, `⚠️ Match ${result.match_id} was disputed by <@${interaction.user.id}>. Please review in <#${interaction.channelId}>.`);
+    await interaction.reply({ content: `Marked match ${result.match_id} as disputed. An organizer will review.`, ephemeral: true });
     await interaction.message.edit({ components: [] }).catch(() => null);
     return;
   }
@@ -788,56 +923,66 @@ async function editMatchMessage(guild, matchId, content) {
   await msg.edit({ content }).catch(() => null);
 }
 
-async function handleReactionResultFlow(reaction, user) {
-  if (user.bot) return;
-  if (reaction.partial) await reaction.fetch().catch(() => null);
-  const msg = reaction.message;
-  if (!msg?.guildId) return;
+async function finalizeByAdminReaction(match, adminUserId, winnerSide, settings, guild) {
+  const score = scoreFromCode(settings.match_format, 0);
+  if (!score) return;
 
-  const match = getMatchByMessage(msg.guildId, msg.channelId, msg.id);
-  if (!match) return;
-
-  const guild = msg.guild;
-  const emoji = reaction.emoji.name;
-  const isPlayer = [match.player_a_discord_id, match.player_b_discord_id].includes(user.id);
-  if (!isPlayer) {
-    await reaction.users.remove(user.id).catch(() => null);
-    return;
+  let scoreA; let scoreB; let winnerId;
+  if (winnerSide === 'A') {
+    [scoreA, scoreB] = score;
+    winnerId = match.player_a_discord_id;
+  } else {
+    [scoreB, scoreA] = score;
+    winnerId = match.player_b_discord_id;
   }
 
-  if (['confirmed', 'disputed', 'cancelled'].includes(match.state)) {
-    await reaction.users.remove(user.id).catch(() => null);
-    return;
+  db.prepare('DELETE FROM results WHERE match_id = ?').run(match.match_id);
+  db.prepare(`
+    INSERT INTO results (match_id, winner_discord_id, score_a, score_b, is_forfeit, reporter_discord_id, confirmer_discord_id, confirmed_at)
+    VALUES (?, ?, ?, ?, 0, ?, ?, datetime('now'))
+  `).run(match.match_id, winnerId, scoreA, scoreB, adminUserId, adminUserId);
+
+  db.prepare("UPDATE matches SET state = 'confirmed', ended_at = datetime('now') WHERE match_id = ?").run(match.match_id);
+  db.prepare("UPDATE fixtures SET status = 'confirmed', confirmed_at = datetime('now') WHERE fixture_id = ?").run(match.fixture_id);
+
+  logAudit('admin_reaction_finalized_match', adminUserId, { matchId: match.match_id, winnerSide, scoreA, scoreB });
+
+  await editMatchMessage(guild, match.match_id, buildMatchAssignmentMessage(match, settings, 'Confirmed', `Final: ${scoreA}-${scoreB} (Admin override by <@${adminUserId}>)`));
+
+  const ch = await guild.channels.fetch(match.match_channel_id).catch(() => null);
+  if (ch && ch.isTextBased()) {
+    const msg = await ch.messages.fetch(match.match_message_id).catch(() => null);
+    if (msg) await msg.react('🔁').catch(() => null);
+  }
+}
+
+function getAdminOverride(matchId) {
+  return db.prepare('SELECT * FROM admin_match_overrides WHERE match_id = ?').get(matchId);
+}
+
+function setAdminOverride(matchId, adminUserId, winnerSide) {
+  const existing = getAdminOverride(matchId);
+  if (!existing) {
+    db.prepare('INSERT INTO admin_match_overrides (match_id, admin_discord_id, winner_side) VALUES (?, ?, ?)').run(matchId, adminUserId, winnerSide);
+    return true;
   }
 
-  const settings = getGuildSettings(msg.guildId);
-  const validScores = getScoreReactionsForFormat(settings.match_format);
+  if (existing.admin_discord_id !== adminUserId) return false;
 
-  if (emoji === '🇦' || emoji === '🇧') {
-    const winnerSide = emoji === '🇦' ? 'A' : 'B';
-    upsertMatchReport(match.match_id, user.id, { winner_side: winnerSide });
-    db.prepare("UPDATE matches SET state = 'reported' WHERE match_id = ?").run(match.match_id);
+  db.prepare(`
+    UPDATE admin_match_overrides
+    SET winner_side = ?, updated_at = datetime('now')
+    WHERE match_id = ?
+  `).run(winnerSide, matchId);
+  return true;
+}
 
-    const scoreGuide = settings.match_format === 'FT2'
-      ? 'Now select score: 0️⃣ for 2-0, 1️⃣ for 2-1.'
-      : 'Now select score: 0️⃣ for 3-0, 1️⃣ for 3-1, 2️⃣ for 3-2.';
+function clearAdminOverride(matchId) {
+  db.prepare('DELETE FROM admin_match_overrides WHERE match_id = ?').run(matchId);
+}
 
-    await editMatchMessage(guild, match.match_id, buildMatchAssignmentMessage(match, settings, 'Reported', `Reported by <@${user.id}>: Winner = ${winnerSide}. Awaiting opponent confirmation + score selection. ${scoreGuide}`));
-
-    for (const e of validScores) await msg.react(e).catch(() => null);
-    return;
-  }
-
-  if (!validScores.includes(emoji)) return;
-
-  const code = validScores.indexOf(emoji);
-  const own = db.prepare('SELECT * FROM match_reports WHERE match_id = ? AND reporter_discord_id = ?').get(match.match_id, user.id);
-  if (!own?.winner_side) {
-    await reaction.users.remove(user.id).catch(() => null);
-    return;
-  }
-
-  upsertMatchReport(match.match_id, user.id, { score_code: code });
+async function reconcileFromPlayerReports(match, settings, guild) {
+  if (getAdminOverride(match.match_id)) return;
 
   const reports = db.prepare('SELECT * FROM match_reports WHERE match_id = ?').all(match.match_id);
   const ra = reports.find(r => r.reporter_discord_id === match.player_a_discord_id);
@@ -847,27 +992,31 @@ async function handleReactionResultFlow(reaction, user) {
   const completeB = rb && rb.winner_side && rb.score_code !== null && rb.score_code !== undefined;
 
   if (!(completeA && completeB)) {
-    await editMatchMessage(guild, match.match_id, buildMatchAssignmentMessage(match, settings, 'Reported', 'Awaiting opponent confirmation + score selection.'));
+    const anyReport = (ra && (ra.winner_side || ra.score_code !== null && ra.score_code !== undefined))
+      || (rb && (rb.winner_side || rb.score_code !== null && rb.score_code !== undefined));
+    db.prepare('DELETE FROM results WHERE match_id = ?').run(match.match_id);
+    db.prepare("UPDATE matches SET state = ?, ended_at = NULL WHERE match_id = ?").run(anyReport ? 'reported' : 'pending', match.match_id);
+    db.prepare("UPDATE fixtures SET status = 'locked_in_match', confirmed_at = NULL WHERE fixture_id = ?").run(match.fixture_id);
+
+    await editMatchMessage(guild, match.match_id, buildMatchAssignmentMessage(match, settings, anyReport ? 'Reported' : 'Pending', 'Awaiting winner + score from both players.'));
     return;
   }
 
   if (ra.winner_side !== rb.winner_side || Number(ra.score_code) !== Number(rb.score_code)) {
-    db.prepare("UPDATE matches SET state = 'disputed' WHERE match_id = ?").run(match.match_id);
-    const details = `Disputed\nPlayer A report: winner=${ra.winner_side}, scoreCode=${ra.score_code}\nPlayer B report: winner=${rb.winner_side}, scoreCode=${rb.score_code}`;
+    db.prepare('DELETE FROM results WHERE match_id = ?').run(match.match_id);
+    db.prepare("UPDATE matches SET state = 'disputed', ended_at = NULL WHERE match_id = ?").run(match.match_id);
+    const details = `Disputed
+Player A report: winner=${ra.winner_side}, scoreCode=${ra.score_code}
+Player B report: winner=${rb.winner_side}, scoreCode=${rb.score_code}`;
     await editMatchMessage(guild, match.match_id, buildMatchAssignmentMessage(match, settings, 'Disputed', details));
-
-    if (settings.admin_channel_id) {
-      const adminChannel = await guild.channels.fetch(settings.admin_channel_id).catch(() => null);
-      if (adminChannel && adminChannel.isTextBased()) {
-        await adminChannel.send(`⚠️ Match ${match.match_id} is disputed. Please review in <#${match.match_channel_id}>.`).catch(() => null);
-      }
-    }
+    await sendDisputeNotification(guild, settings, `⚠️ Match ${match.match_id} is disputed. Please review in <#${match.match_channel_id}>.`);
     return;
   }
 
   const winnerSide = ra.winner_side;
   const score = scoreFromCode(settings.match_format, Number(ra.score_code));
   if (!score) return;
+
   let scoreA; let scoreB; let winnerId;
   if (winnerSide === 'A') {
     [scoreA, scoreB] = score;
@@ -885,8 +1034,154 @@ async function handleReactionResultFlow(reaction, user) {
 
   db.prepare("UPDATE matches SET state = 'confirmed', ended_at = datetime('now') WHERE match_id = ?").run(match.match_id);
   db.prepare("UPDATE fixtures SET status = 'confirmed', confirmed_at = datetime('now') WHERE fixture_id = ?").run(match.fixture_id);
-
   await editMatchMessage(guild, match.match_id, buildMatchAssignmentMessage(match, settings, 'Confirmed', `Final: ${scoreA}-${scoreB} (Confirmed)`));
+
+  const ch = await guild.channels.fetch(match.match_channel_id).catch(() => null);
+  if (ch && ch.isTextBased()) {
+    const msg = await ch.messages.fetch(match.match_message_id).catch(() => null);
+    if (msg) await msg.react('🔁').catch(() => null);
+  }
+}
+
+async function handleRematchReactionAdd(match, userId, guild, settings) {
+  if (![match.player_a_discord_id, match.player_b_discord_id].includes(userId)) return;
+
+  db.prepare('INSERT OR IGNORE INTO rematch_votes (match_id, discord_user_id) VALUES (?, ?)').run(match.match_id, userId);
+
+  const votes = db.prepare('SELECT discord_user_id FROM rematch_votes WHERE match_id = ?').all(match.match_id).map((r) => r.discord_user_id);
+  const bothReady = votes.includes(match.player_a_discord_id) && votes.includes(match.player_b_discord_id);
+  if (!bothReady) return;
+
+  const nextFixture = db.prepare(`
+    SELECT fixture_id, player_a_discord_id, player_b_discord_id
+    FROM fixtures
+    WHERE league_id = 1
+      AND status = 'unplayed'
+      AND ((player_a_discord_id = ? AND player_b_discord_id = ?) OR (player_a_discord_id = ? AND player_b_discord_id = ?))
+    ORDER BY leg_number ASC, fixture_id ASC
+    LIMIT 1
+  `).get(match.player_a_discord_id, match.player_b_discord_id, match.player_b_discord_id, match.player_a_discord_id);
+
+  if (!nextFixture) return;
+
+  const channel = await guild.channels.fetch(match.match_channel_id || settings.results_channel_id).catch(() => null);
+  if (!channel || !channel.isTextBased()) return;
+
+  await createPendingMatch(nextFixture, channel, guild.id);
+  db.prepare('DELETE FROM rematch_votes WHERE match_id = ?').run(match.match_id);
+
+  await channel.send({
+    content: `🔁 Rematch accepted for Match ${match.match_id}. New match posted for <@${match.player_a_discord_id}> and <@${match.player_b_discord_id}>.`,
+    allowed_mentions: { users: [match.player_a_discord_id, match.player_b_discord_id], roles: [], replied_user: false },
+  }).catch(() => null);
+}
+
+function handleRematchReactionRemove(match, userId) {
+  db.prepare('DELETE FROM rematch_votes WHERE match_id = ? AND discord_user_id = ?').run(match.match_id, userId);
+}
+
+async function handleReactionResultFlow(reaction, user) {
+  if (user.bot) return;
+  if (reaction.partial) await reaction.fetch().catch(() => null);
+  const msg = reaction.message;
+  if (!msg?.guildId) return;
+
+  const match = getMatchByMessage(msg.guildId, msg.channelId, msg.id);
+  if (!match) return;
+
+  const guild = msg.guild;
+  const emoji = reaction.emoji.name;
+  const settings = getGuildSettings(msg.guildId);
+  const validScores = getScoreReactionsForFormat(settings.match_format);
+
+  const isPlayer = [match.player_a_discord_id, match.player_b_discord_id].includes(user.id);
+  const member = await guild.members.fetch(user.id).catch(() => null);
+  const isAdminActor = member ? isAdminMember(member, msg.guildId) : false;
+
+  if (!isPlayer && !isAdminActor) {
+    await reaction.users.remove(user.id).catch(() => null);
+    return;
+  }
+
+  if (match.state === 'cancelled') {
+    await reaction.users.remove(user.id).catch(() => null);
+    return;
+  }
+
+  if (emoji === '🔁') {
+    if (match.state !== 'confirmed') {
+      await reaction.users.remove(user.id).catch(() => null);
+      return;
+    }
+    await handleRematchReactionAdd(match, user.id, guild, settings);
+    return;
+  }
+
+  if (isAdminActor && (emoji === '🇦' || emoji === '🇧')) {
+    const winnerSide = emoji === '🇦' ? 'A' : 'B';
+    const accepted = setAdminOverride(match.match_id, user.id, winnerSide);
+    if (!accepted) {
+      await reaction.users.remove(user.id).catch(() => null);
+      return;
+    }
+
+    await finalizeByAdminReaction(match, user.id, winnerSide, settings, guild);
+    return;
+  }
+
+  const hasAdminOverride = !!getAdminOverride(match.match_id);
+  if (match.state === 'confirmed' && !hasAdminOverride) {
+    await reaction.users.remove(user.id).catch(() => null);
+    return;
+  }
+
+  if (emoji === '🇦' || emoji === '🇧') {
+    const winnerSide = emoji === '🇦' ? 'A' : 'B';
+    upsertMatchReport(match.match_id, user.id, { winner_side: winnerSide });
+
+    for (const e of validScores) await msg.react(e).catch(() => null);
+    await reconcileFromPlayerReports(match, settings, guild);
+    return;
+  }
+
+  if (!validScores.includes(emoji)) return;
+
+  const code = validScores.indexOf(emoji);
+  upsertMatchReport(match.match_id, user.id, { score_code: code });
+  await reconcileFromPlayerReports(match, settings, guild);
+}
+
+async function handleReactionResultFlowRemove(reaction, user) {
+  if (user.bot) return;
+  if (reaction.partial) await reaction.fetch().catch(() => null);
+  const msg = reaction.message;
+  if (!msg?.guildId) return;
+
+  const match = getMatchByMessage(msg.guildId, msg.channelId, msg.id);
+  if (!match) return;
+
+  const guild = msg.guild;
+  const emoji = reaction.emoji.name;
+  const settings = getGuildSettings(msg.guildId);
+
+  if (emoji === '🔁') {
+    handleRematchReactionRemove(match, user.id);
+    return;
+  }
+
+  const member = await guild.members.fetch(user.id).catch(() => null);
+  const isAdminActor = member ? isAdminMember(member, msg.guildId) : false;
+  if (!isAdminActor) return;
+  if (emoji !== '🇦' && emoji !== '🇧') return;
+
+  const override = getAdminOverride(match.match_id);
+  if (!override) return;
+  if (override.admin_discord_id !== user.id) return;
+  if ((override.winner_side === 'A' && emoji !== '🇦') || (override.winner_side === 'B' && emoji !== '🇧')) return;
+
+  clearAdminOverride(match.match_id);
+  logAudit('admin_reaction_override_removed', user.id, { matchId: match.match_id });
+  await reconcileFromPlayerReports(match, settings, guild);
 }
 
 client.on(Events.MessageReactionAdd, async (reaction, user) => {
@@ -894,6 +1189,14 @@ client.on(Events.MessageReactionAdd, async (reaction, user) => {
     await handleReactionResultFlow(reaction, user);
   } catch (err) {
     console.error('Reaction flow error:', err);
+  }
+});
+
+client.on(Events.MessageReactionRemove, async (reaction, user) => {
+  try {
+    await handleReactionResultFlowRemove(reaction, user);
+  } catch (err) {
+    console.error('Reaction remove flow error:', err);
   }
 });
 
@@ -1096,6 +1399,28 @@ ${lines.join('\n')}`, ephemeral: false });
         return;
       }
 
+      if (name === 'left') {
+        const p = ensureSignedUp(interaction);
+        if (!p) {
+          await interaction.reply({ content: 'You must /signup before using /left.' });
+          return;
+        }
+
+        const report = buildLeftToPlayMessage(interaction.user.id);
+        try {
+          await interaction.user.send({ content: report });
+          await interaction.reply({ content: 'I sent your remaining matches report to your DMs.', ephemeral: true });
+        } catch {
+          await interaction.reply({ content: 'I could not DM you. Please enable DMs from server members and try again.', ephemeral: true });
+        }
+        return;
+      }
+
+      if (name === 'matches') {
+        await interaction.reply({ content: buildMatchesMessage(), ephemeral: false });
+        return;
+      }
+
       if (name === 'help') {
         await interaction.reply({
           content: [
@@ -1104,9 +1429,11 @@ ${lines.join('\n')}`, ephemeral: false });
             "• /checkin — mark today's availability (attendance requirement)",
             '• /ready and /unready — join/leave live matchmaking queue',
             '• /queue — view current ready players',
+            '• /left — see who you still need to play and remaining matches',
             '• /standings or /table — view live standings table anytime',
+            '• /matches — view recent match IDs and statuses',
             '• /mydata — view your private stored profile details',
-            'Admins: /bot_settings, /admin_status, /admin_tournament_settings, /admin_setup_tournament, /admin_generate_fixtures, /admin_force_result, /admin_void_match, /admin_reset_league',
+            'Admins: /bot_settings, /admin_status, /admin_player_matches, /admin_player_left, /admin_tournament_settings, /admin_setup_tournament, /admin_generate_fixtures, /admin_force_result, /admin_void_match, /admin_dispute_match, /admin_reset_league',
           ].join('\n'),
         });
         return;
@@ -1122,7 +1449,8 @@ ${lines.join('\n')}`, ephemeral: false });
             '3) `/ready` when you can play now, `/unready` when you cannot.',
             '4) Use `/standings` or `/table` anytime for the league table.',
             '5) Use `/queue` to see who is currently available.',
-            '6) Use `/mydata` to view your saved profile (private).',
+            '6) Use `/left` to see opponents and remaining matches sorted by priority.',
+            '7) Use `/mydata` to view your saved profile (private).',
             'Tip: `/playerhelp` is an alias if `/helpplayer` is hard to find.',
           ].join('\n'),
         });
@@ -1148,6 +1476,7 @@ ${lines.join('\n')}`, ephemeral: false });
               `resultsChannelId: ${gs.results_channel_id || '(not set)'}`,
               `adminChannelId: ${gs.admin_channel_id || '(not set)'}`,
               `standingsChannelId: ${gs.standings_channel_id || '(not set)'}`,
+              `disputeChannelId: ${gs.dispute_channel_id || '(not set)'}`,
               `matchFormat: ${gs.match_format}`,
               `allowPublicPlayerCommands: ${gs.allow_public_player_commands ? 'true' : 'false'}`,
               `tournamentName: ${gs.tournament_name}`,
@@ -1189,6 +1518,7 @@ ${lines.join('\n')}`, ephemeral: false });
         if (sub === 'set_tournament_name') patch.tournament_name = interaction.options.getString('name', true).trim();
         if (sub === 'set_timezone') patch.timezone = interaction.options.getString('tz', true).trim();
         if (sub === 'set_standings_channel') patch.standings_channel_id = interaction.options.getChannel('channel', true).id;
+        if (sub === 'set_dispute_channel') patch.dispute_channel_id = interaction.options.getChannel('channel', true).id;
         if (sub === 'set_diagnostics') patch.enable_diagnostics = interaction.options.getBoolean('enabled', true) ? 1 : 0;
         if (sub === 'set_allow_public_player_commands') patch.allow_public_player_commands = interaction.options.getBoolean('enabled', true) ? 1 : 0;
         if (sub === 'set_cleanup_policy') {
@@ -1257,6 +1587,34 @@ ${lines.join('\n')}`, ephemeral: false });
         return;
       }
 
+
+      if (name === 'admin_player_matches') {
+        if (!isAdmin(interaction)) {
+          await interaction.reply({ content: 'Admin only.', ephemeral: true });
+          return;
+        }
+
+        const target = interaction.options.getUser('player', true);
+        await interaction.reply({ content: buildMatchesMessage(30, target.id), ephemeral: true });
+        return;
+      }
+
+      if (name === 'admin_player_left') {
+        if (!isAdmin(interaction)) {
+          await interaction.reply({ content: 'Admin only.', ephemeral: true });
+          return;
+        }
+
+        const target = interaction.options.getUser('player', true);
+        const p = getPlayer(target.id);
+        if (!p) {
+          await interaction.reply({ content: 'That user is not signed up in the league.', ephemeral: true });
+          return;
+        }
+
+        await interaction.reply({ content: buildLeftToPlayMessage(target.id), ephemeral: true });
+        return;
+      }
 
       if (name === 'admin_tournament_settings') {
         if (!isAdmin(interaction)) {
@@ -1444,6 +1802,35 @@ ${buildTournamentSettingsMessage()}`,
           content: `Forced result recorded: <@${winnerUser.id}> wins ${scoreA}-${scoreB}${isForfeit ? ' (FORFEIT)' : ''}. (result_id=${ins.lastInsertRowid})`,
           ephemeral: true,
         });
+        return;
+      }
+
+
+      if (name === 'admin_dispute_match') {
+        if (!isAdmin(interaction)) {
+          await interaction.reply({ content: 'Admin only.', ephemeral: true });
+          return;
+        }
+
+        const matchId = interaction.options.getInteger('match_id', true);
+        const reason = (interaction.options.getString('reason') || 'Manual admin dispute').trim();
+        const match = db.prepare('SELECT * FROM matches WHERE match_id = ?').get(matchId);
+        if (!match) {
+          await interaction.reply({ content: 'Match not found.', ephemeral: true });
+          return;
+        }
+
+        db.prepare("UPDATE matches SET state = 'disputed' WHERE match_id = ?").run(matchId);
+        logAudit('admin_dispute_match', interaction.user.id, { matchId, reason });
+
+        const gs = getGuildSettings(interaction.guildId);
+        await sendDisputeNotification(
+          interaction.guild,
+          gs,
+          `⚠️ Admin marked match ${matchId} as disputed. Reason: ${reason}. Review channel: <#${match.match_channel_id || gs.results_channel_id || ''}>`
+        );
+
+        await interaction.reply({ content: `Match ${matchId} marked as disputed.`, ephemeral: true });
         return;
       }
 

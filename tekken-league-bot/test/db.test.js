@@ -42,3 +42,14 @@ test('initDb migrates legacy matches schema before creating indexes', () => {
 
   db.close();
 });
+
+
+test('initDb creates admin override and rematch vote tables', () => {
+  const db = new Database(':memory:');
+  initDb(db);
+
+  const names = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('admin_match_overrides','rematch_votes') ORDER BY name").all().map((r) => r.name);
+  assert.deepEqual(names, ['admin_match_overrides', 'rematch_votes']);
+
+  db.close();
+});

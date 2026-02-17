@@ -59,6 +59,14 @@ const commands = [
     .setName('queue')
     .setDescription('Show who is currently in the ready queue'),
 
+  new SlashCommandBuilder()
+    .setName('left')
+    .setDescription('Show opponents you still need to play and matches remaining'),
+
+  new SlashCommandBuilder()
+    .setName('matches')
+    .setDescription('Show recent matches with match IDs and statuses'),
+
 
   new SlashCommandBuilder()
     .setName('bot_settings')
@@ -93,6 +101,10 @@ const commands = [
       .setName('set_standings_channel')
       .setDescription('Set optional standings channel')
       .addChannelOption(o => o.setName('channel').setDescription('Standings channel').setRequired(true)))
+    .addSubcommand(sc => sc
+      .setName('set_dispute_channel')
+      .setDescription('Set channel for dispute notifications')
+      .addChannelOption(o => o.setName('channel').setDescription('Dispute channel').setRequired(true)))
     .addSubcommand(sc => sc
       .setName('set_cleanup_policy')
       .setDescription('Set message cleanup policy')
@@ -129,6 +141,25 @@ const commands = [
   new SlashCommandBuilder()
     .setName('admin_status')
     .setDescription('Admin: quick snapshot of league health and queue state')
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
+
+  new SlashCommandBuilder()
+    .setName('admin_player_matches')
+    .setDescription('Admin: view matches for a specific player')
+    .addUserOption(o => o
+      .setName('player')
+      .setDescription('Player to inspect')
+      .setRequired(true))
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
+  new SlashCommandBuilder()
+    .setName('admin_player_left')
+    .setDescription('Admin: view who a specific player still has to play')
+    .addUserOption(o => o
+      .setName('player')
+      .setDescription('Player to inspect')
+      .setRequired(true))
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 
 
@@ -195,6 +226,20 @@ const commands = [
       .setName('forfeit')
       .setDescription('Set true for no-show/DQ/forfeit (loser gets 0 points)')
       .setRequired(false))
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
+  new SlashCommandBuilder()
+    .setName('admin_dispute_match')
+    .setDescription('Admin: mark a match as disputed and notify dispute channel')
+    .addIntegerOption(o => o
+      .setName('match_id')
+      .setDescription('Match ID')
+      .setRequired(true))
+    .addStringOption(o => o
+      .setName('reason')
+      .setDescription('Reason for dispute')
+      .setRequired(false)
+      .setMaxLength(200))
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 
   new SlashCommandBuilder()
