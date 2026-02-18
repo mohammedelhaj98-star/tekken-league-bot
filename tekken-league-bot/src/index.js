@@ -1707,17 +1707,185 @@ client.on(Events.InteractionCreate, async (interaction) => {
           return;
         }
 
-        const realName = decryptString(p.real_name_enc);
-        const email = decryptString(p.email_enc);
-        const phone = decryptString(p.phone_enc);
+        const pA = getPlayer(playerA.id);
+        const pB = getPlayer(playerB.id);
+        if (!pA || !pB) {
+          await interaction.reply({ content: 'Both selected users must be signed up.', ephemeral: true });
+          return;
+        }
 
+        const eligibleOpponentIds = getEligibleOpponentsForPlayer(playerA.id).map((row) => row.opponent_id);
+        if (!eligibleOpponentIds.includes(playerB.id)) {
+          const choices = getEligibleOpponentsForPlayer(playerA.id).map((row) => row.tekken_tag || row.opponent_id);
+          await interaction.reply({
+            content: choices.length
+              ? `That opponent is not eligible for ${pA.tekken_tag}. Eligible opponents: ${choices.join(', ')}`
+              : `${pA.tekken_tag} has no eligible opponents left.`,
+            ephemeral: true,
+          });
+          return;
+        }
+
+        const fixture = getNextUnplayedFixtureBetween(playerA.id, playerB.id);
+        if (!fixture) {
+          await interaction.reply({ content: 'No unplayed fixture remains between these players.', ephemeral: true });
+          return;
+        }
+
+        const settings = getGuildSettings(interaction.guildId);
+        const channelId = settings.results_channel_id || MATCH_CHANNEL_ID;
+        const channel = await interaction.guild.channels.fetch(channelId).catch(() => null);
+        if (!channel || !channel.isTextBased()) {
+          await interaction.reply({ content: 'Results channel not found. Configure it with /bot_settings set_results_channel.', ephemeral: true });
+          return;
+        }
+
+        await createPendingMatch(fixture, channel, interaction.guildId);
+        logAudit('admin_vs_create_match', interaction.user.id, { fixtureId: fixture.fixture_id, playerA: playerA.id, playerB: playerB.id });
+        await interaction.reply({ content: `Created pending match for <@${playerA.id}> vs <@${playerB.id}>.`, ephemeral: true });
+        return;
+      }
+
+
+      if (name === 'bot_settings') {
+        if (!isAdmin(interaction)) {
+          await interaction.reply({ content: 'Admin only.', ephemeral: true });
+          return;
+        }
+
+        const sub = interaction.options.getSubcommand();
+        const guildId = interaction.guildId;
+
+        if (sub === 'view') {
+          const gs = getGuildSettings(guildId);
+          const roles = getConfiguredAdminRoleIds(guildId);
+          await interaction.reply({
+            content: [
+              '**Bot Settings**',
+              `resultsChannelId: ${gs.results_channel_id || '(not set)'}`,
+              `adminChannelId: ${gs.admin_channel_id || '(not set)'}`,
+              `standingsChannelId: ${gs.standings_channel_id || '(not set)'}`,
+              `disputeChannelId: ${gs.dispute_channel_id || '(not set)'}`,
+              `activityChannelId: ${gs.activity_channel_id || '(not set)'}`,
+              `matchFormat: ${gs.match_format}`,
+              `allowPublicPlayerCommands: ${gs.allow_public_player_commands ? 'true' : 'false'}`,
+              `tournamentName: ${gs.tournament_name}`,
+              `timezone: ${gs.timezone}`,
+              `cleanupPolicy: ${gs.cleanup_policy}${gs.cleanup_days ? ` (${gs.cleanup_days} days)` : ''}`,
+              `enableDiagnostics: ${gs.enable_diagnostics ? 'true' : 'false'}`,
+              `adminRoles: ${roles.length ? roles.map(r => `<@&${r}>`).join(', ') : '(none)'}`,
+            ].join('\n'),
+            ephemeral: true,
+          });
+          return;
+        }
+
+        if (sub === 'set_admin_roles') {
+          const roles = [
+            interaction.options.getRole('role_1', true),
+            interaction.options.getRole('role_2'),
+            interaction.options.getRole('role_3'),
+            interaction.options.getRole('role_4'),
+            interaction.options.getRole('role_5'),
+          ].filter(Boolean);
+
+          const ids = [...new Set(roles.map(r => r.id))];
+          db.transaction((roleIds) => {
+            db.prepare('DELETE FROM admin_roles WHERE league_id = 1 AND (guild_id = ? OR guild_id IS NULL)').run(String(guildId));
+            const ins = db.prepare('INSERT INTO admin_roles (league_id, guild_id, role_id) VALUES (1, ?, ?)');
+            for (const id of roleIds) ins.run(String(guildId), id);
+          })(ids);
+
+          logAudit('bot_settings_set_admin_roles', interaction.user.id, { guildId, roleIds: ids });
+          await interaction.reply({ content: `Admin roles set: ${ids.map(id => `<@&${id}>`).join(', ')}`, ephemeral: true });
+          return;
+        }
+
+        const patch = {};
+        if (sub === 'set_results_channel') patch.results_channel_id = interaction.options.getChannel('channel', true).id;
+        if (sub === 'set_admin_channel') patch.admin_channel_id = interaction.options.getChannel('channel', true).id;
+        if (sub === 'set_match_format') patch.match_format = interaction.options.getString('format', true);
+        if (sub === 'set_tournament_name') patch.tournament_name = interaction.options.getString('name', true).trim();
+        if (sub === 'set_timezone') patch.timezone = interaction.options.getString('tz', true).trim();
+        if (sub === 'set_standings_channel') patch.standings_channel_id = interaction.options.getChannel('channel', true).id;
+        if (sub === 'set_dispute_channel') patch.dispute_channel_id = interaction.options.getChannel('channel', true).id;
+        if (sub === 'set_activity_channel') patch.activity_channel_id = interaction.options.getChannel('channel', true).id;
+        if (sub === 'set_diagnostics') patch.enable_diagnostics = interaction.options.getBoolean('enabled', true) ? 1 : 0;
+        if (sub === 'set_allow_public_player_commands') patch.allow_public_player_commands = interaction.options.getBoolean('enabled', true) ? 1 : 0;
+        if (sub === 'set_cleanup_policy') {
+          const policy = interaction.options.getString('policy', true);
+          const days = interaction.options.getInteger('days');
+          if (policy === 'archive' && (!days || days < 1 || days > 365)) {
+            await interaction.reply({ content: 'For archive policy, days must be between 1 and 365.', ephemeral: true });
+            return;
+          }
+          patch.cleanup_policy = policy;
+          patch.cleanup_days = policy === 'archive' ? days : null;
+        }
+
+        if (patch.timezone) {
+          try {
+            new Intl.DateTimeFormat('en-US', { timeZone: patch.timezone }).format(new Date());
+          } catch {
+            await interaction.reply({ content: 'Invalid timezone. Use IANA format like Asia/Qatar.', ephemeral: true });
+            return;
+          }
+        }
+
+        updateGuildSetting(guildId, patch);
+        logAudit('bot_settings_update', interaction.user.id, { guildId, subcommand: sub, patch });
+        await interaction.reply({ content: `Updated ${sub}.`, ephemeral: true });
+        return;
+      }
+
+      if (name === 'queue') {
+        const queue = getReadyQueueSnapshot();
+        if (!queue.length) {
+          await interaction.reply({ content: 'Ready queue is currently empty.', ephemeral: false });
+          return;
+        }
+
+        const lines = queue.map((row, idx) => `${idx + 1}. ${row.tekken_tag || row.discord_user_id} (<@${row.discord_user_id}>)`);
+        await interaction.reply({ content: `**Ready Queue (${queue.length})**
+${lines.join('\n')}`, ephemeral: false });
+        return;
+      }
+
+      if (name === 'left') {
+        const p = ensureSignedUp(interaction);
+        if (!p) {
+          await interaction.reply({ content: 'You are not signed up yet. Use /signup first.' });
+          return;
+        }
+
+        const report = buildLeftToPlayMessage(interaction.user.id);
+        try {
+          await interaction.user.send({ content: report });
+          await interaction.reply({ content: 'I sent your remaining matches report to your DMs.', ephemeral: true });
+        } catch {
+          await interaction.reply({ content: 'I could not DM you. Please enable DMs from server members and try again.', ephemeral: true });
+        }
+        return;
+      }
+
+      if (name === 'matches') {
+        await interaction.reply({ content: buildMatchesMessage(), ephemeral: false });
+        return;
+      }
+
+      if (name === 'help') {
         await interaction.reply({
           content: [
-            `Real name: ${realName}`,
-            `Tekken tag: ${p.tekken_tag}`,
-            `Email: ${maskEmail(email)}`,
-            `Phone: ${maskPhone(phone)}`,
-            `Discord: ${p.discord_display_name_last_seen || p.discord_display_name_at_signup || interaction.user.username}`,
+            '**League Bot Quick Help**',
+            '• /signup — register or update your league profile',
+            "• /checkin — mark today's availability (attendance requirement)",
+            '• /ready and /unready — join/leave live matchmaking queue',
+            '• /queue — view current ready players',
+            '• /left — see who you still need to play and remaining matches',
+            '• /standings or /table — view live standings table anytime',
+            '• /matches — view recent match IDs and statuses',
+            '• /mydata — view your private stored profile details',
+            'Admins: /adminhelp, /points, /admin_vs, /bot_settings, /admin_status, /admin_player_matches, /admin_player_left, /admin_tournament_settings, /admin_setup_tournament, /admin_generate_fixtures, /admin_force_result, /admin_void_match, /admin_dispute_match, /admin_reset (DM confirm), /admin_reset_league',
           ].join('\n'),
         });
         return;
@@ -1730,11 +1898,312 @@ client.on(Events.InteractionCreate, async (interaction) => {
           return;
         }
 
-        const today = getTodayISO(true);
+        await interaction.reply({
+          content: [
+            '**Admin Commands Help**',
+            '• /admin_status — quick league health + queue snapshot.',
+            '• /admin_generate_fixtures — generate missing round-robin fixtures.',
+            '• /admin_player_matches — inspect one player match list.',
+            '• /admin_player_left — inspect one player remaining opponents.',
+            '• /admin_tournament_settings — view current tournament setup + points.',
+            '• /admin_setup_tournament — update setup fields (days, slots, show%).',
+            '• /points — set points for win, loss, no-show, and 3-0 sweep bonus.',
+            '• /admin_vs — create a specific match between two eligible players.',
+            '• /admin_force_result — force a result for no-show/dispute scenarios.',
+            '• /admin_void_match — remove result and reopen fixture.',
+            '• /admin_dispute_match — mark a match disputed and notify staff.',
+            '• /admin_reset and /admin_reset_league — dangerous reset flows (DM reaction confirm).',
+          ].join('\n'),
+          ephemeral: true,
+        });
+        return;
+      }
+
+      if (name === 'points') {
+        if (!isAdmin(interaction)) {
+          await interaction.reply({ content: 'Admin only.', ephemeral: true });
+          return;
+        }
+
+        logAudit('checkin', interaction.user.id, { date: today });
+        await sendActivityNotification(interaction.guild, getGuildSettings(interaction.guildId), `✅ Check-in: <@${interaction.user.id}> on ${today}.`).catch(() => null);
+        await interaction.reply({ content: `Checked in for ${today}.` });
+        return;
+      }
+
+      if (name === 'ready') {
+        const p = ensureSignedUp(interaction);
+        if (!p) {
+          await interaction.reply({ content: 'You must /signup before using /ready.' });
+          return;
+        }
+
+        if (!hasCheckedInToday(interaction.user.id)) {
+          await interaction.reply({ content: 'Please /checkin for today first (attendance rule).' });
+          return;
+        }
+
+        if (hasActiveMatch(interaction.user.id)) {
+          await interaction.reply({ content: 'You already have an active/pending match. Finish it before queueing again.' });
+          return;
+        }
+
+        addToReadyQueue(interaction.user.id);
+        logAudit('queue_join', interaction.user.id);
+        await sendActivityNotification(interaction.guild, getGuildSettings(interaction.guildId), `🟢 Ready: <@${interaction.user.id}> joined the queue.`).catch(() => null);
+        await interaction.reply({ content: 'You are in the queue. Waiting for an opponent...' });
+        await tryMatchmake(interaction.guild);
+        return;
+      }
+
+      if (name === 'unready') {
+        removeFromReadyQueue(interaction.user.id);
+        logAudit('queue_leave', interaction.user.id);
+        await interaction.reply({ content: 'Removed from queue.' });
+        return;
+      }
+
+      if (name === 'standings') {
+        await interaction.reply({
+          content: buildStandingsListMessage(),
+          ephemeral: false,
+        });
+        return;
+      }
+
+      if (name === 'table') {
+        await interaction.deferReply({ ephemeral: false });
+
+        let pages;
+        try {
+          pages = buildStandingsTablePages();
+        } catch (err) {
+          console.error('Failed to build table pages:', err);
+          await interaction.editReply({ content: 'Unable to generate the table right now. Please try again.' });
+          return;
+        }
+
+        await interaction.editReply({ content: pages[0] });
+
+        if (pages.length > 1) {
+          const tableMsg = await interaction.fetchReply().catch(() => null);
+          if (tableMsg?.id) {
+            rememberTablePagination(tableMsg.id, tableMsg.channelId, pages);
+            await tableMsg.react('◀️').catch(() => null);
+            await tableMsg.react('▶️').catch(() => null);
+          }
+        }
+        return;
+      }
+
+      if (name === 'queue') {
+        const queue = getReadyQueueSnapshot();
+        if (!queue.length) {
+          await interaction.reply({ content: 'Ready queue is currently empty.', ephemeral: false });
+          return;
+        }
+
+        const lines = queue.map((row, idx) => `${idx + 1}. ${row.tekken_tag || row.discord_user_id} (<@${row.discord_user_id}>)`);
+        await interaction.reply({ content: `**Ready Queue (${queue.length})**
+${lines.join('\n')}`, ephemeral: false });
+        return;
+      }
+
+      if (name === 'left') {
+        const p = ensureSignedUp(interaction);
+        if (!p) {
+          await interaction.reply({ content: 'You are not signed up yet. Use /signup first.' });
+          return;
+        }
+
+        const report = buildLeftToPlayMessage(interaction.user.id);
+        try {
+          await interaction.user.send({ content: report });
+          await interaction.reply({ content: 'I sent your remaining matches report to your DMs.', ephemeral: true });
+        } catch {
+          await interaction.reply({ content: 'I could not DM you. Please enable DMs from server members and try again.', ephemeral: true });
+        }
+        return;
+      }
+
+      if (name === 'matches') {
+        await interaction.reply({ content: buildMatchesMessage(), ephemeral: false });
+        return;
+      }
+
+      if (name === 'help') {
+        await interaction.reply({
+          content: [
+            '**League Bot Quick Help**',
+            '• /signup — register or update your league profile',
+            "• /checkin — mark today's availability (attendance requirement)",
+            '• /ready and /unready — join/leave live matchmaking queue',
+            '• /queue — view current ready players',
+            '• /left — see who you still need to play and remaining matches',
+            '• /standings or /table — view live standings table anytime',
+            '• /matches — view recent match IDs and statuses',
+            '• /mydata — view your private stored profile details',
+            'Admins: /adminhelp, /points, /admin_vs, /bot_settings, /admin_status, /admin_player_matches, /admin_player_left, /admin_tournament_settings, /admin_setup_tournament, /admin_generate_fixtures, /admin_force_result, /admin_void_match, /admin_dispute_match, /admin_reset (DM confirm), /admin_reset_league',
+          ].join('\n'),
+        });
+        return;
+      }
+
+      if (name === 'checkin') {
+        const p = ensureSignedUp(interaction);
+        if (!p) {
+          await interaction.reply({ content: 'You must /signup before checking in.' });
+          return;
+        }
+
+        const rules = normalizePointRules({
+          points_win: interaction.options.getInteger('win', true),
+          points_loss: interaction.options.getInteger('loss', true),
+          points_no_show: interaction.options.getInteger('no_show', true),
+          points_sweep_bonus: interaction.options.getInteger('sweep_bonus', true),
+        });
+
+        logAudit('checkin', interaction.user.id, { date: today });
+        await sendActivityNotification(interaction.guild, getGuildSettings(interaction.guildId), `✅ Check-in: <@${interaction.user.id}> on ${today}.`).catch(() => null);
+        await interaction.reply({ content: `Checked in for ${today}.` });
+        return;
+      }
+
+      if (name === 'ready') {
+        const p = ensureSignedUp(interaction);
+        if (!p) {
+          await interaction.reply({ content: 'You must /signup before using /ready.' });
+          return;
+        }
+
+        if (!hasCheckedInToday(interaction.user.id)) {
+          await interaction.reply({ content: 'Please /checkin for today first (attendance rule).' });
+          return;
+        }
+
+        if (hasActiveMatch(interaction.user.id)) {
+          await interaction.reply({ content: 'You already have an active/pending match. Finish it before queueing again.' });
+          return;
+        }
+
+        addToReadyQueue(interaction.user.id);
+        logAudit('queue_join', interaction.user.id);
+        await sendActivityNotification(interaction.guild, getGuildSettings(interaction.guildId), `🟢 Ready: <@${interaction.user.id}> joined the queue.`).catch(() => null);
+        await interaction.reply({ content: 'You are in the queue. Waiting for an opponent...' });
+        await tryMatchmake(interaction.guild);
+        return;
+      }
+
+      if (name === 'unready') {
+        removeFromReadyQueue(interaction.user.id);
+        logAudit('queue_leave', interaction.user.id);
+        await interaction.reply({ content: 'Removed from queue.' });
+        return;
+      }
+
+      if (name === 'standings') {
+        await interaction.reply({
+          content: buildStandingsListMessage(),
+          ephemeral: false,
+        });
+        return;
+      }
+
+      if (name === 'table') {
+        let pages;
+        try {
+          pages = buildStandingsTablePages();
+        } catch (err) {
+          console.error('Failed to build table pages:', err);
+          await interaction.editReply({ content: 'Unable to generate the table right now. Please try again.' });
+          return;
+        }
+
+        await interaction.editReply({ content: pages[0] });
+
+        if (pages.length > 1) {
+          const tableMsg = await interaction.fetchReply().catch(() => null);
+          if (tableMsg?.id && typeof tableMsg.react === 'function') {
+            rememberTablePagination(tableMsg.id, tableMsg.channelId, pages);
+            await tableMsg.react('◀️').catch(() => null);
+            await tableMsg.react('▶️').catch(() => null);
+          }
+        }
+        return;
+      }
+
+      if (name === 'queue') {
+        const queue = getReadyQueueSnapshot();
+        if (!queue.length) {
+          await interaction.reply({ content: 'Ready queue is currently empty.', ephemeral: false });
+          return;
+        }
+
+        const lines = queue.map((row, idx) => `${idx + 1}. ${row.tekken_tag || row.discord_user_id} (<@${row.discord_user_id}>)`);
+        await interaction.reply({ content: `**Ready Queue (${queue.length})**
+${lines.join('\n')}`, ephemeral: false });
+        return;
+      }
+
+      if (name === 'left') {
+        const p = ensureSignedUp(interaction);
+        if (!p) {
+          await interaction.reply({ content: 'You are not signed up yet. Use /signup first.' });
+          return;
+        }
+
+        const report = buildLeftToPlayMessage(interaction.user.id);
+        try {
+          await interaction.user.send({ content: report });
+          await interaction.reply({ content: 'I sent your remaining matches report to your DMs.', ephemeral: true });
+        } catch {
+          await interaction.reply({ content: 'I could not DM you. Please enable DMs from server members and try again.', ephemeral: true });
+        }
+        return;
+      }
+
+      if (name === 'matches') {
+        await interaction.reply({ content: buildMatchesMessage(), ephemeral: false });
+        return;
+      }
+
+      if (name === 'help') {
+        await interaction.reply({
+          content: [
+            '**League Bot Quick Help**',
+            '• /signup — register or update your league profile',
+            "• /checkin — mark today's availability (attendance requirement)",
+            '• /ready and /unready — join/leave live matchmaking queue',
+            '• /queue — view current ready players',
+            '• /left — see who you still need to play and remaining matches',
+            '• /standings or /table — view live standings table anytime',
+            '• /matches — view recent match IDs and statuses',
+            '• /mydata — view your private stored profile details',
+            'Admins: /adminhelp, /points, /admin_vs, /bot_settings, /admin_status, /admin_player_matches, /admin_player_left, /admin_tournament_settings, /admin_setup_tournament, /admin_generate_fixtures, /admin_force_result, /admin_void_match, /admin_dispute_match, /admin_reset (DM confirm), /admin_reset_league',
+          ].join('\n'),
+        });
+        return;
+      }
+
+      if (name === 'checkin') {
+        const p = ensureSignedUp(interaction);
+        if (!p) {
+          await interaction.reply({ content: 'You must /signup before checking in.' });
+          return;
+        }
+
+        const rules = normalizePointRules({
+          points_win: interaction.options.getInteger('win', true),
+          points_loss: interaction.options.getInteger('loss', true),
+          points_no_show: interaction.options.getInteger('no_show', true),
+          points_sweep_bonus: interaction.options.getInteger('sweep_bonus', true),
+        });
+
         db.prepare(`
-          INSERT OR REPLACE INTO attendance (league_id, discord_user_id, date, checked_in)
-          VALUES (1, ?, ?, 1)
-        `).run(interaction.user.id, today);
+          UPDATE leagues
+          SET points_win = ?, points_loss = ?, points_no_show = ?, points_sweep_bonus = ?
+          WHERE league_id = 1
+        `).run(rules.points_win, rules.points_loss, rules.points_no_show, rules.points_sweep_bonus);
 
         logAudit('checkin', interaction.user.id, { date: today });
         await sendActivityNotification(interaction.guild, getGuildSettings(interaction.guildId), `✅ Check-in: <@${interaction.user.id}> on ${today}.`).catch(() => null);
