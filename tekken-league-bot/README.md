@@ -82,6 +82,16 @@ Run unit tests with:
 npm test
 ```
 
+## Startup safety and troubleshooting
+- `npm start` now runs `npm run check:syntax` automatically first (via `prestart`).
+- If PM2 logs show a syntax error that does not match your local file, deploy a clean copy and restart with fresh env/process state:
+
+```bash
+git pull
+npm ci
+pm2 restart tekken-league-bot --update-env
+```
+
 ## Tournament setup
 Use `/admin_setup_tournament` to configure the league before generating fixtures. You can set:
 - max players
