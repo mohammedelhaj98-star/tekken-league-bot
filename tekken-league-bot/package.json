@@ -5,8 +5,11 @@
   "type": "commonjs",
   "main": "src/index.js",
   "scripts": {
+    "prestart": "npm run check:syntax",
     "start": "node src/index.js",
-    "deploy": "node src/deploy-commands.js"
+    "deploy": "node src/deploy-commands.js",
+    "test": "node --test",
+    "check:syntax": "node --check src/index.js && node --check src/deploy-commands.js"
   },
   "dependencies": {
     "better-sqlite3": "^11.7.2",
