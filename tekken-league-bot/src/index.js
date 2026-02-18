@@ -2053,12 +2053,6 @@ ${lines.join('\n')}`, ephemeral: false });
           points_sweep_bonus: interaction.options.getInteger('sweep_bonus', true),
         });
 
-        db.prepare(`
-          UPDATE leagues
-          SET points_win = ?, points_loss = ?, points_no_show = ?, points_sweep_bonus = ?
-          WHERE league_id = 1
-        `).run(rules.points_win, rules.points_loss, rules.points_no_show, rules.points_sweep_bonus);
-
         logAudit('checkin', interaction.user.id, { date: today });
         await sendActivityNotification(interaction.guild, getGuildSettings(interaction.guildId), `✅ Check-in: <@${interaction.user.id}> on ${today}.`).catch(() => null);
         await interaction.reply({ content: `Checked in for ${today}.` });
@@ -2119,7 +2113,7 @@ ${lines.join('\n')}`, ephemeral: false });
 
         if (pages.length > 1) {
           const tableMsg = await interaction.fetchReply().catch(() => null);
-          if (tableMsg?.id) {
+          if (tableMsg?.id && typeof tableMsg.react === 'function') {
             rememberTablePagination(tableMsg.id, tableMsg.channelId, pages);
             await tableMsg.react('◀️').catch(() => null);
             await tableMsg.react('▶️').catch(() => null);
@@ -2250,6 +2244,150 @@ ${lines.join('\n')}`, ephemeral: false });
           content: `Points updated: win=${rules.points_win}, loss=${rules.points_loss}, no-show=${rules.points_no_show}, 3-0 sweep bonus=${rules.points_sweep_bonus}.`,
           ephemeral: true,
         });
+        return;
+      }
+
+      if (name === 'admin_vs') {
+        if (!isAdmin(interaction)) {
+          await interaction.reply({ content: 'Admin only.', ephemeral: true });
+          return;
+        }
+
+        const playerA = interaction.options.getUser('player_a', true);
+        const playerB = interaction.options.getUser('player_b', true);
+        if (playerA.id === playerB.id) {
+          await interaction.reply({ content: 'Select two different players.', ephemeral: true });
+          return;
+        }
+
+        const pA = getPlayer(playerA.id);
+        const pB = getPlayer(playerB.id);
+        if (!pA || !pB) {
+          await interaction.reply({ content: 'Both selected users must be signed up.', ephemeral: true });
+          return;
+        }
+
+        const eligibleOpponentIds = getEligibleOpponentsForPlayer(playerA.id).map((row) => row.opponent_id);
+        if (!eligibleOpponentIds.includes(playerB.id)) {
+          const choices = getEligibleOpponentsForPlayer(playerA.id).map((row) => row.tekken_tag || row.opponent_id);
+          await interaction.reply({
+            content: choices.length
+              ? `That opponent is not eligible for ${pA.tekken_tag}. Eligible opponents: ${choices.join(', ')}`
+              : `${pA.tekken_tag} has no eligible opponents left.`,
+            ephemeral: true,
+          });
+          return;
+        }
+
+        const fixture = getNextUnplayedFixtureBetween(playerA.id, playerB.id);
+        if (!fixture) {
+          await interaction.reply({ content: 'No unplayed fixture remains between these players.', ephemeral: true });
+          return;
+        }
+
+        const settings = getGuildSettings(interaction.guildId);
+        const channelId = settings.results_channel_id || MATCH_CHANNEL_ID;
+        const channel = await interaction.guild.channels.fetch(channelId).catch(() => null);
+        if (!channel || !channel.isTextBased()) {
+          await interaction.reply({ content: 'Results channel not found. Configure it with /bot_settings set_results_channel.', ephemeral: true });
+          return;
+        }
+
+        await createPendingMatch(fixture, channel, interaction.guildId);
+        logAudit('admin_vs_create_match', interaction.user.id, { fixtureId: fixture.fixture_id, playerA: playerA.id, playerB: playerB.id });
+        await interaction.reply({ content: `Created pending match for <@${playerA.id}> vs <@${playerB.id}>.`, ephemeral: true });
+        return;
+      }
+
+
+      if (name === 'bot_settings') {
+        if (!isAdmin(interaction)) {
+          await interaction.reply({ content: 'Admin only.', ephemeral: true });
+          return;
+        }
+
+        const sub = interaction.options.getSubcommand();
+        const guildId = interaction.guildId;
+
+        if (sub === 'view') {
+          const gs = getGuildSettings(guildId);
+          const roles = getConfiguredAdminRoleIds(guildId);
+          await interaction.reply({
+            content: [
+              '**Bot Settings**',
+              `resultsChannelId: ${gs.results_channel_id || '(not set)'}`,
+              `adminChannelId: ${gs.admin_channel_id || '(not set)'}`,
+              `standingsChannelId: ${gs.standings_channel_id || '(not set)'}`,
+              `disputeChannelId: ${gs.dispute_channel_id || '(not set)'}`,
+              `activityChannelId: ${gs.activity_channel_id || '(not set)'}`,
+              `matchFormat: ${gs.match_format}`,
+              `allowPublicPlayerCommands: ${gs.allow_public_player_commands ? 'true' : 'false'}`,
+              `tournamentName: ${gs.tournament_name}`,
+              `timezone: ${gs.timezone}`,
+              `cleanupPolicy: ${gs.cleanup_policy}${gs.cleanup_days ? ` (${gs.cleanup_days} days)` : ''}`,
+              `enableDiagnostics: ${gs.enable_diagnostics ? 'true' : 'false'}`,
+              `adminRoles: ${roles.length ? roles.map(r => `<@&${r}>`).join(', ') : '(none)'}`,
+            ].join('\n'),
+            ephemeral: true,
+          });
+          return;
+        }
+
+        if (sub === 'set_admin_roles') {
+          const roles = [
+            interaction.options.getRole('role_1', true),
+            interaction.options.getRole('role_2'),
+            interaction.options.getRole('role_3'),
+            interaction.options.getRole('role_4'),
+            interaction.options.getRole('role_5'),
+          ].filter(Boolean);
+
+          const ids = [...new Set(roles.map(r => r.id))];
+          db.transaction((roleIds) => {
+            db.prepare('DELETE FROM admin_roles WHERE league_id = 1 AND (guild_id = ? OR guild_id IS NULL)').run(String(guildId));
+            const ins = db.prepare('INSERT INTO admin_roles (league_id, guild_id, role_id) VALUES (1, ?, ?)');
+            for (const id of roleIds) ins.run(String(guildId), id);
+          })(ids);
+
+          logAudit('bot_settings_set_admin_roles', interaction.user.id, { guildId, roleIds: ids });
+          await interaction.reply({ content: `Admin roles set: ${ids.map(id => `<@&${id}>`).join(', ')}`, ephemeral: true });
+          return;
+        }
+
+        const patch = {};
+        if (sub === 'set_results_channel') patch.results_channel_id = interaction.options.getChannel('channel', true).id;
+        if (sub === 'set_admin_channel') patch.admin_channel_id = interaction.options.getChannel('channel', true).id;
+        if (sub === 'set_match_format') patch.match_format = interaction.options.getString('format', true);
+        if (sub === 'set_tournament_name') patch.tournament_name = interaction.options.getString('name', true).trim();
+        if (sub === 'set_timezone') patch.timezone = interaction.options.getString('tz', true).trim();
+        if (sub === 'set_standings_channel') patch.standings_channel_id = interaction.options.getChannel('channel', true).id;
+        if (sub === 'set_dispute_channel') patch.dispute_channel_id = interaction.options.getChannel('channel', true).id;
+        if (sub === 'set_activity_channel') patch.activity_channel_id = interaction.options.getChannel('channel', true).id;
+        if (sub === 'set_diagnostics') patch.enable_diagnostics = interaction.options.getBoolean('enabled', true) ? 1 : 0;
+        if (sub === 'set_allow_public_player_commands') patch.allow_public_player_commands = interaction.options.getBoolean('enabled', true) ? 1 : 0;
+        if (sub === 'set_cleanup_policy') {
+          const policy = interaction.options.getString('policy', true);
+          const days = interaction.options.getInteger('days');
+          if (policy === 'archive' && (!days || days < 1 || days > 365)) {
+            await interaction.reply({ content: 'For archive policy, days must be between 1 and 365.', ephemeral: true });
+            return;
+          }
+          patch.cleanup_policy = policy;
+          patch.cleanup_days = policy === 'archive' ? days : null;
+        }
+
+        if (patch.timezone) {
+          try {
+            new Intl.DateTimeFormat('en-US', { timeZone: patch.timezone }).format(new Date());
+          } catch {
+            await interaction.reply({ content: 'Invalid timezone. Use IANA format like Asia/Qatar.', ephemeral: true });
+            return;
+          }
+        }
+
+        updateGuildSetting(guildId, patch);
+        logAudit('bot_settings_update', interaction.user.id, { guildId, subcommand: sub, patch });
+        await interaction.reply({ content: `Updated ${sub}.`, ephemeral: true });
         return;
       }
 
