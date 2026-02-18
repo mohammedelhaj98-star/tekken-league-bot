@@ -17,7 +17,7 @@ const { openDb, initDb } = require('./db');
 const { encryptString, decryptString, maskEmail, maskPhone } = require('./crypto');
 const { isValidEmail, isValidPhone, normalizeEmail, normalizePhone, cleanTekkenTag, cleanName } = require('./validate');
 const { generateDoubleRoundRobinFixtures, computeStandings, getTodayISO, getLeaguePointRules, normalizePointRules } = require('./league');
-const { validateTournamentSetupInput } = require('./tournament-config');
+const { validateTournamentSetupInput, parseTimeSlotStarts } = require('./tournament-config');
 
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
 const MATCH_CHANNEL_ID = process.env.MATCH_CHANNEL_ID;
@@ -35,6 +35,7 @@ const db = openDb();
 initDb(db);
 
 const TABLE_PAGE_SIZE = 8;
+const QATAR_TIMEZONE = 'Asia/Qatar';
 
 const client = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.GuildMessageReactions],
@@ -312,13 +313,6 @@ function scoreFromCode(format, code) {
   return null;
 }
 
-function parseAdminScore(raw) {
-  const s = String(raw || '').trim();
-  const m = s.match(/^(3)\s*[-:]\s*([0-2])$/);
-  if (!m) return null;
-  return { winner: 3, loser: Number(m[2]) };
-}
-
 function daysBetweenInclusive(startDateIso, endDateIso) {
   const start = new Date(`${startDateIso}T00:00:00Z`);
   const end = new Date(`${endDateIso}T00:00:00Z`);
@@ -326,6 +320,109 @@ function daysBetweenInclusive(startDateIso, endDateIso) {
   const diffMs = end.getTime() - start.getTime();
   const days = Math.floor(diffMs / (24 * 60 * 60 * 1000)) + 1;
   return Math.max(1, days);
+}
+
+function getQatarNowParts(now = new Date()) {
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: QATAR_TIMEZONE,
+    hour12: false,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    weekday: 'short',
+    hour: '2-digit',
+    minute: '2-digit',
+  }).formatToParts(now);
+
+  const map = Object.fromEntries(parts.map((p) => [p.type, p.value]));
+  return {
+    dateIso: `${map.year}-${map.month}-${map.day}`,
+    dayLabel: String(map.weekday || '').toLowerCase(),
+    hour: Number(map.hour),
+    minute: Number(map.minute),
+    hhmm: `${map.hour}:${map.minute}`,
+  };
+}
+
+function parseSlotStartsForCheckin(raw) {
+  const text = String(raw || '').trim();
+  if (!text) return [];
+  const parsed = parseTimeSlotStarts(text);
+  if (!parsed.ok) return [];
+  return parsed.times.map((t) => {
+    const [hh, mm] = t.split(':').map(Number);
+    return { label: t, startMinute: (hh * 60) + mm };
+  }).sort((a, b) => a.startMinute - b.startMinute);
+}
+
+function formatMinutesAsHHMM(totalMinutes) {
+  const normalized = ((totalMinutes % 1440) + 1440) % 1440;
+  const hh = String(Math.floor(normalized / 60)).padStart(2, '0');
+  const mm = String(normalized % 60).padStart(2, '0');
+  return `${hh}:${mm}`;
+}
+
+function buildCheckinWindowStatus(leagueRow, now = new Date()) {
+  const duration = Number(leagueRow?.timeslot_duration_minutes);
+  const starts = parseSlotStartsForCheckin(leagueRow?.timeslot_starts);
+  const nowParts = getQatarNowParts(now);
+  const nowMinute = (nowParts.hour * 60) + nowParts.minute;
+
+  if (!Number.isFinite(duration) || duration <= 0 || !starts.length) {
+    return {
+      configured: false,
+      inSlot: true,
+      nowHHMM: nowParts.hhmm,
+      durationMinutes: null,
+      message: 'Timeslots not configured; check-in allowed anytime.',
+      windowLabel: 'Anytime',
+    };
+  }
+
+  const windows = starts.map((slot) => {
+    const endAbsolute = slot.startMinute + duration;
+    return {
+      ...slot,
+      endAbsolute,
+      crossesMidnight: endAbsolute >= 1440,
+      endMinuteInDay: endAbsolute % 1440,
+    };
+  });
+
+  const active = windows.find((w) => {
+    if (!w.crossesMidnight) return nowMinute >= w.startMinute && nowMinute < w.endAbsolute;
+    return nowMinute >= w.startMinute || nowMinute < w.endMinuteInDay;
+  });
+
+  if (active) {
+    const endLabel = active.crossesMidnight ? `${formatMinutesAsHHMM(active.endAbsolute)} (+1 day)` : formatMinutesAsHHMM(active.endAbsolute);
+    return {
+      configured: true,
+      inSlot: true,
+      nowHHMM: nowParts.hhmm,
+      durationMinutes: duration,
+      windowLabel: `${active.label}–${endLabel}`,
+      slotStart: active.label,
+      slotEnd: endLabel,
+    };
+  }
+
+  const nextToday = windows.find((w) => w.startMinute > nowMinute);
+  const nextWindow = nextToday || windows[0];
+  const dayText = nextToday ? 'today' : 'tomorrow';
+  const nextEndLabel = nextWindow.crossesMidnight
+    ? `${formatMinutesAsHHMM(nextWindow.endAbsolute)} (+1 day)`
+    : formatMinutesAsHHMM(nextWindow.endAbsolute);
+
+  return {
+    configured: true,
+    inSlot: false,
+    nowHHMM: nowParts.hhmm,
+    durationMinutes: duration,
+    nextStart: nextWindow.label,
+    nextStartDayText: dayText,
+    nextEnd: nextEndLabel,
+  };
 }
 
 function buildMatchAssignmentMessage(match, settings, status = 'Pending', details = '') {
@@ -1239,9 +1336,6 @@ async function runMatchmakingTick() {
       console.error('Background matchmaking tick error:', err);
     });
   }
-
-  upsertMatchReport(match.match_id, user.id, { score_code: code });
-  await reconcileFromPlayerReports(match, settings, guild);
 }
 
 function invokeMatchmakingTickSafely() {
@@ -2866,6 +2960,431 @@ ${lines.join('\n')}`, ephemeral: false });
           return;
         }
 
+      if (name === 'ping') {
+        await interaction.reply({ content: 'pong' });
+        return;
+      }
+
+
+      if (name === 'bot_settings') {
+        if (!isAdmin(interaction)) {
+          await interaction.reply({ content: 'Admin only.', ephemeral: true });
+          return;
+        }
+
+        const sub = interaction.options.getSubcommand();
+        const guildId = interaction.guildId;
+
+        if (sub === 'view') {
+          const gs = getGuildSettings(guildId);
+          const roles = getConfiguredAdminRoleIds(guildId);
+          await interaction.reply({
+            content: [
+              '**Bot Settings**',
+              `resultsChannelId: ${gs.results_channel_id || '(not set)'}`,
+              `adminChannelId: ${gs.admin_channel_id || '(not set)'}`,
+              `standingsChannelId: ${gs.standings_channel_id || '(not set)'}`,
+              `disputeChannelId: ${gs.dispute_channel_id || '(not set)'}`,
+              `activityChannelId: ${gs.activity_channel_id || '(not set)'}`,
+              `matchFormat: ${gs.match_format}`,
+              `allowPublicPlayerCommands: ${gs.allow_public_player_commands ? 'true' : 'false'}`,
+              `tournamentName: ${gs.tournament_name}`,
+              `timezone: ${gs.timezone}`,
+              `cleanupPolicy: ${gs.cleanup_policy}${gs.cleanup_days ? ` (${gs.cleanup_days} days)` : ''}`,
+              `enableDiagnostics: ${gs.enable_diagnostics ? 'true' : 'false'}`,
+              `adminRoles: ${roles.length ? roles.map(r => `<@&${r}>`).join(', ') : '(none)'}`,
+            ].join('\n'),
+            ephemeral: true,
+          });
+          return;
+        }
+
+        if (sub === 'set_admin_roles') {
+          const roles = [
+            interaction.options.getRole('role_1', true),
+            interaction.options.getRole('role_2'),
+            interaction.options.getRole('role_3'),
+            interaction.options.getRole('role_4'),
+            interaction.options.getRole('role_5'),
+          ].filter(Boolean);
+
+          const ids = [...new Set(roles.map(r => r.id))];
+          db.transaction((roleIds) => {
+            db.prepare('DELETE FROM admin_roles WHERE league_id = 1 AND (guild_id = ? OR guild_id IS NULL)').run(String(guildId));
+            const ins = db.prepare('INSERT INTO admin_roles (league_id, guild_id, role_id) VALUES (1, ?, ?)');
+            for (const id of roleIds) ins.run(String(guildId), id);
+          })(ids);
+
+          logAudit('bot_settings_set_admin_roles', interaction.user.id, { guildId, roleIds: ids });
+          await interaction.reply({ content: `Admin roles set: ${ids.map(id => `<@&${id}>`).join(', ')}`, ephemeral: true });
+          return;
+        }
+
+        const patch = {};
+        if (sub === 'set_results_channel') patch.results_channel_id = interaction.options.getChannel('channel', true).id;
+        if (sub === 'set_admin_channel') patch.admin_channel_id = interaction.options.getChannel('channel', true).id;
+        if (sub === 'set_match_format') patch.match_format = interaction.options.getString('format', true);
+        if (sub === 'set_tournament_name') patch.tournament_name = interaction.options.getString('name', true).trim();
+        if (sub === 'set_timezone') patch.timezone = interaction.options.getString('tz', true).trim();
+        if (sub === 'set_standings_channel') patch.standings_channel_id = interaction.options.getChannel('channel', true).id;
+        if (sub === 'set_dispute_channel') patch.dispute_channel_id = interaction.options.getChannel('channel', true).id;
+        if (sub === 'set_activity_channel') patch.activity_channel_id = interaction.options.getChannel('channel', true).id;
+        if (sub === 'set_diagnostics') patch.enable_diagnostics = interaction.options.getBoolean('enabled', true) ? 1 : 0;
+        if (sub === 'set_allow_public_player_commands') patch.allow_public_player_commands = interaction.options.getBoolean('enabled', true) ? 1 : 0;
+        if (sub === 'set_cleanup_policy') {
+          const policy = interaction.options.getString('policy', true);
+          const days = interaction.options.getInteger('days');
+          if (policy === 'archive' && (!days || days < 1 || days > 365)) {
+            await interaction.reply({ content: 'For archive policy, days must be between 1 and 365.', ephemeral: true });
+            return;
+          }
+          patch.cleanup_policy = policy;
+          patch.cleanup_days = policy === 'archive' ? days : null;
+        }
+
+        if (patch.timezone) {
+          try {
+            new Intl.DateTimeFormat('en-US', { timeZone: patch.timezone }).format(new Date());
+          } catch {
+            await interaction.reply({ content: 'Invalid timezone. Use IANA format like Asia/Qatar.', ephemeral: true });
+            return;
+          }
+        }
+
+        updateGuildSetting(guildId, patch);
+        logAudit('bot_settings_update', interaction.user.id, { guildId, subcommand: sub, patch });
+        await interaction.reply({ content: `Updated ${sub}.`, ephemeral: true });
+        return;
+      }
+
+      if (name === 'mydata') {
+        const p = ensureSignedUp(interaction);
+        if (!p) {
+          await interaction.reply({ content: 'You are not signed up yet. Use /signup first.' });
+          return;
+        }
+
+        const players = db.prepare("SELECT COUNT(1) AS c FROM players WHERE league_id = 1 AND status = 'active'").get().c;
+        const fixtures = db.prepare("SELECT COUNT(1) AS c FROM fixtures WHERE league_id = 1").get().c;
+        const confirmedFixtures = db.prepare("SELECT COUNT(1) AS c FROM fixtures WHERE league_id = 1 AND status = 'confirmed'").get().c;
+        const queueCount = db.prepare('SELECT COUNT(1) AS c FROM ready_queue WHERE league_id = 1').get().c;
+        const activeMatches = db.prepare("SELECT COUNT(1) AS c FROM matches WHERE league_id = 1 AND state IN ('pending','reported','active','disputed')").get().c;
+
+        await interaction.reply({
+          content: [
+            '**League Admin Status**',
+            `Players (active): ${players}`,
+            `Fixtures: ${fixtures} total / ${confirmedFixtures} confirmed`,
+            `Ready queue: ${queueCount}`,
+            `Open matches: ${activeMatches}`,
+          ].join('\n'),
+          ephemeral: true,
+        });
+        return;
+      }
+
+      if (name === 'checkin') {
+        const p = ensureSignedUp(interaction);
+        if (!p) {
+          await interaction.reply({ content: 'You must /signup before checking in.' });
+          return;
+        }
+
+        const league = db.prepare('SELECT timeslot_duration_minutes, timeslot_starts FROM leagues WHERE league_id = 1').get() || {};
+        const status = buildCheckinWindowStatus(league);
+        const today = getTodayISO(true);
+
+        if (!status.inSlot) {
+          await interaction.reply({
+            content: [
+              'Check-in is currently closed.',
+              `Current Qatar time: ${status.nowHHMM}`,
+              `Next slot: ${status.nextStart} (${status.nextStartDayText})`,
+              `Slot end: ${status.nextEnd}`,
+              `Check-in duration: ${status.durationMinutes} minutes`,
+            ].join('\n'),
+          });
+          return;
+        }
+
+        const existing = db.prepare(`
+          SELECT checked_in FROM attendance
+          WHERE league_id = 1 AND discord_user_id = ? AND date = ?
+        `).get(interaction.user.id, today);
+
+        const details = [
+          `Current Qatar time: ${status.nowHHMM}`,
+          status.configured
+            ? `Slot window: ${status.windowLabel}`
+            : 'Slot window: anytime (timeslots not configured)',
+          status.durationMinutes
+            ? `Check-in duration: ${status.durationMinutes} minutes`
+            : 'Timeslots not configured; check-in allowed anytime.',
+        ];
+
+        if (existing && Number(existing.checked_in) === 1) {
+          await interaction.reply({
+            content: [`Already checked in for ${today}.`, ...details].join('\n'),
+          });
+          return;
+        }
+
+        db.prepare(`
+          INSERT INTO attendance (league_id, discord_user_id, date, checked_in, checked_in_at)
+          VALUES (1, ?, ?, 1, datetime('now'))
+          ON CONFLICT(league_id, discord_user_id, date)
+          DO UPDATE SET
+            checked_in = 1,
+            checked_in_at = datetime('now')
+        `).run(interaction.user.id, today);
+
+        logAudit('checkin', interaction.user.id, { date: today, slot: status.windowLabel || 'anytime' });
+        await sendActivityNotification(interaction.guild, getGuildSettings(interaction.guildId), `✅ Check-in: <@${interaction.user.id}> on ${today}.`).catch(() => null);
+
+        await interaction.reply({
+          content: [
+            `Checked in for ${today}.`,
+            status.configured
+              ? `Slot window: ${status.windowLabel}`
+              : 'Timeslots not configured; check-in allowed anytime.',
+            status.durationMinutes
+              ? `Check-in duration: ${status.durationMinutes} minutes`
+              : 'Check-in duration: not set',
+          ].join('\n'),
+        });
+        return;
+      }
+
+      if (name === 'ready') {
+        const p = ensureSignedUp(interaction);
+        if (!p) {
+          await interaction.reply({ content: 'You must /signup before using /ready.' });
+          return;
+        }
+
+        if (!hasCheckedInToday(interaction.user.id)) {
+          await interaction.reply({ content: 'Please /checkin for today first (attendance rule).' });
+          return;
+        }
+
+        if (hasActiveMatch(interaction.user.id)) {
+          await interaction.reply({ content: 'You already have an active/pending match. Finish it before queueing again.' });
+          return;
+        }
+
+        addToReadyQueue(interaction.user.id);
+        logAudit('queue_join', interaction.user.id);
+        await sendActivityNotification(interaction.guild, getGuildSettings(interaction.guildId), `🟢 Ready: <@${interaction.user.id}> joined the queue.`).catch(() => null);
+        await interaction.reply({ content: 'You are in the queue. Waiting for an opponent...' });
+        await tryMatchmake(interaction.guild);
+        return;
+      }
+
+      if (name === 'unready') {
+        removeFromReadyQueue(interaction.user.id);
+        logAudit('queue_leave', interaction.user.id);
+        await interaction.reply({ content: 'Removed from queue.' });
+        return;
+      }
+
+      if (name === 'standings') {
+        await interaction.reply({
+          content: buildStandingsListMessage(),
+          ephemeral: false,
+        });
+        return;
+      }
+
+      if (name === 'table') {
+        let pages;
+        try {
+          pages = buildStandingsTablePages();
+        } catch (err) {
+          console.error('Failed to build table pages:', err);
+          await interaction.editReply({ content: 'Unable to generate the table right now. Please try again.' });
+          return;
+        }
+
+        const totalPages = pages.length;
+        const requestedPageRaw = interaction.options.getInteger('page') || 1;
+        const requestedPage = Math.max(1, Math.min(totalPages, requestedPageRaw));
+        const pageContent = pages[requestedPage - 1];
+
+        try {
+          await interaction.editReply({ content: pageContent });
+        } catch (err) {
+          console.error('Failed to send table page response:', err);
+          const fallback = buildStandingsListMessage();
+          await interaction.editReply({ content: `${fallback}\n\n(Table fallback: ASCII render failed in this context.)` }).catch(() => null);
+          return;
+        }
+        return;
+      }
+
+      if (name === 'queue') {
+        const queue = getReadyQueueSnapshot();
+        if (!queue.length) {
+          await interaction.reply({ content: 'Ready queue is currently empty.', ephemeral: false });
+          return;
+        }
+
+        const lines = queue.map((row, idx) => `${idx + 1}. ${row.tekken_tag || row.discord_user_id} (<@${row.discord_user_id}>)`);
+        await interaction.reply({ content: `**Ready Queue (${queue.length})**
+${lines.join('\n')}`, ephemeral: false });
+        return;
+      }
+
+      if (name === 'left') {
+        const p = ensureSignedUp(interaction);
+        if (!p) {
+          await interaction.reply({ content: 'You must /signup before using /left.' });
+          return;
+        }
+
+        const report = buildLeftToPlayMessage(interaction.user.id);
+        try {
+          await interaction.user.send({ content: report });
+          await interaction.reply({ content: 'I sent your remaining matches report to your DMs.', ephemeral: true });
+        } catch {
+          await interaction.reply({ content: 'I could not DM you. Please enable DMs from server members and try again.', ephemeral: true });
+        }
+        return;
+      }
+
+      if (name === 'matches') {
+        await interaction.reply({ content: buildMatchesMessage(), ephemeral: false });
+        return;
+      }
+
+      if (name === 'help') {
+        await interaction.reply({
+          content: [
+            '**League Bot Quick Help**',
+            '• /signup — register or update your league profile',
+            "• /checkin — mark today's availability (attendance requirement)",
+            '• /ready and /unready — join/leave live matchmaking queue',
+            '• /queue — view current ready players',
+            '• /left — see who you still need to play and remaining matches',
+            '• /standings or /table — view live standings table anytime',
+            '• /matches — view recent match IDs and statuses',
+            '• /mydata — view your private stored profile details',
+            'Admins: /adminhelp, /points, /admin_vs, /bot_settings, /admin_status, /admin_player_matches, /admin_player_left, /admin_tournament_settings, /admin_setup_tournament, /admin_generate_fixtures, /admin_force_result, /admin_void_match, /admin_dispute_match, /admin_reset, /admin_reset_confirm, /admin_reset_league',
+          ].join('\n'),
+        });
+        return;
+      }
+
+
+      if (name === 'helpplayer' || name === 'playerhelp') {
+        await interaction.reply({
+          content: [
+            '**Player Help**',
+            '1) `/signup` to register your league details.',
+            '2) `/checkin` daily to count attendance.',
+            '3) `/ready` when you can play now, `/unready` when you cannot.',
+            '4) Use `/standings` or `/table` anytime for the league table.',
+            '5) Use `/queue` to see who is currently available.',
+            '6) Use `/left` to see opponents and remaining matches sorted by priority.',
+            '7) Use `/mydata` to view your saved profile (private).',
+            'Tip: `/playerhelp` is an alias if `/helpplayer` is hard to find.',
+          ].join('\n'),
+        });
+        return;
+      }
+
+      if (name === 'adminhelp') {
+        if (!isAdmin(interaction)) {
+          await interaction.reply({ content: 'Admin only.', ephemeral: true });
+          return;
+        }
+
+        await interaction.reply({
+          content: [
+            '**Admin Commands Help**',
+            '• /admin_status — quick league health + queue snapshot.',
+            '• /admin_generate_fixtures — generate missing round-robin fixtures.',
+            '• /admin_player_matches — inspect one player match list.',
+            '• /admin_player_left — inspect one player remaining opponents.',
+            '• /admin_tournament_settings — view current tournament setup + points.',
+            '• /admin_setup_tournament — update setup fields (days, slots, show%).',
+            '• /points — set points for win, loss, no-show, and 3-0 sweep bonus.',
+            '• /admin_vs — create a specific match between two eligible players.',
+            '• /admin_force_result — force a result for no-show/dispute scenarios.',
+            '• /admin_void_match — remove result and reopen fixture.',
+            '• /admin_dispute_match — mark a match disputed and notify staff.',
+            '• /admin_reset and /admin_reset_league — request reset token (5 min expiry).',
+            '• /admin_reset_confirm — confirm pending reset with your token.',
+          ].join('\n'),
+          ephemeral: true,
+        });
+        return;
+      }
+
+      if (name === 'points') {
+        if (!isAdmin(interaction)) {
+          await interaction.reply({ content: 'Admin only.', ephemeral: true });
+          return;
+        }
+
+        const rules = normalizePointRules({
+          points_win: interaction.options.getInteger('win', true),
+          points_loss: interaction.options.getInteger('loss', true),
+          points_no_show: interaction.options.getInteger('no_show', true),
+          points_sweep_bonus: interaction.options.getInteger('sweep_bonus', true),
+        });
+
+        db.prepare(`
+          UPDATE leagues
+          SET points_win = ?, points_loss = ?, points_no_show = ?, points_sweep_bonus = ?
+          WHERE league_id = 1
+        `).run(rules.points_win, rules.points_loss, rules.points_no_show, rules.points_sweep_bonus);
+
+        logAudit('admin_points_update', interaction.user.id, rules);
+        await interaction.reply({
+          content: `Points updated: win=${rules.points_win}, loss=${rules.points_loss}, no-show=${rules.points_no_show}, 3-0 sweep bonus=${rules.points_sweep_bonus}.`,
+          ephemeral: true,
+        });
+        return;
+      }
+
+      if (name === 'admin_vs') {
+        if (!isAdmin(interaction)) {
+          await interaction.reply({ content: 'Admin only.', ephemeral: true });
+          return;
+        }
+
+        const playerA = interaction.options.getUser('player_a', true);
+        const playerB = interaction.options.getUser('player_b', true);
+        if (playerA.id === playerB.id) {
+          await interaction.reply({ content: 'Select two different players.', ephemeral: true });
+          return;
+        }
+
+        const pA = getPlayer(playerA.id);
+        const pB = getPlayer(playerB.id);
+        if (!pA || !pB) {
+          await interaction.reply({ content: 'Both selected users must be signed up.', ephemeral: true });
+          return;
+        }
+
+        const eligibleOpponentIds = getEligibleOpponentsForPlayer(playerA.id).map((row) => row.opponent_id);
+        if (!eligibleOpponentIds.includes(playerB.id)) {
+          const choices = getEligibleOpponentsForPlayer(playerA.id).map((row) => row.tekken_tag || row.opponent_id);
+          await interaction.reply({
+            content: choices.length
+              ? `That opponent is not eligible for ${pA.tekken_tag}. Eligible opponents: ${choices.join(', ')}`
+              : `${pA.tekken_tag} has no eligible opponents left.`,
+            ephemeral: true,
+          });
+          return;
+        }
+
+        const fixture = getNextUnplayedFixtureBetween(playerA.id, playerB.id);
+        if (!fixture) {
+          await interaction.reply({ content: 'No unplayed fixture remains between these players.', ephemeral: true });
+          return;
+        }
+
         const settings = getGuildSettings(interaction.guildId);
         const channelId = settings.results_channel_id || MATCH_CHANNEL_ID;
         const channel = await interaction.guild.channels.fetch(channelId).catch(() => null);
@@ -3112,8 +3631,14 @@ ${buildTournamentSettingsMessage()}`,
           tournament_start_date: validated.values.tournament_start_date ?? current.tournament_start_date,
         };
 
+        if (clearTimeslotStarts && validated.values.timeslot_starts === '') {
+          merged.timeslot_starts = '';
+          merged.timeslot_count = 0;
+        }
+
         const timeslotStartsList = String(merged.timeslot_starts || '').split(',').map((x) => x.trim()).filter(Boolean);
-        if (timeslotStartsList.length !== merged.timeslot_count) {
+        const isTimeslotConfigCleared = merged.timeslot_count === 0 && timeslotStartsList.length === 0;
+        if (!isTimeslotConfigCleared && timeslotStartsList.length !== merged.timeslot_count) {
           await interaction.reply({
             content: `No. of timeslots (${merged.timeslot_count}) must match start times count (${timeslotStartsList.length}).`,
             ephemeral: true,
@@ -3247,67 +3772,13 @@ ${buildTournamentSettingsMessage()}`,
           return;
         }
 
-        const matchId = interaction.options.getInteger('match_id', true);
-        const winnerUser = interaction.options.getUser('winner', true);
-        const scoreRaw = interaction.options.getString('score', true);
-        const isForfeit = interaction.options.getBoolean('forfeit') === true;
-
-        const match = db.prepare('SELECT * FROM matches WHERE match_id = ?').get(matchId);
-        if (!match) {
-          await interaction.reply({ content: 'Match not found.', ephemeral: true });
-          return;
-        }
-
-        if (![match.player_a_discord_id, match.player_b_discord_id].includes(winnerUser.id)) {
-          await interaction.reply({ content: 'Winner must be one of the two players in this match.', ephemeral: true });
-          return;
-        }
-
-        // Remove any previous unconfirmed results for this match
-        db.prepare('DELETE FROM results WHERE match_id = ? AND confirmed_at IS NULL').run(matchId);
-
-        // If already confirmed, require void first
-        const alreadyConfirmed = db.prepare('SELECT 1 FROM results WHERE match_id = ? AND confirmed_at IS NOT NULL').get(matchId);
-        if (alreadyConfirmed) {
-          await interaction.reply({ content: 'This match already has a confirmed result. Use /admin_void_match first if you need to change it.', ephemeral: true });
-          return;
-        }
-
-        let scoreA = 0;
-        let scoreB = 0;
-        if (isForfeit) {
-          scoreA = winnerUser.id === match.player_a_discord_id ? 3 : 0;
-          scoreB = winnerUser.id === match.player_b_discord_id ? 3 : 0;
-        } else {
-          const parsed = parseAdminScore(scoreRaw);
-          if (!parsed) {
-            await interaction.reply({ content: 'Invalid score. Use 3-0, 3-1, or 3-2.', ephemeral: true });
-            return;
-          }
-          if (winnerUser.id === match.player_a_discord_id) {
-            scoreA = 3;
-            scoreB = parsed.loser;
-          } else {
-            scoreA = parsed.loser;
-            scoreB = 3;
-          }
-        }
-
-        const ins = db.prepare(`
-          INSERT INTO results (match_id, winner_discord_id, score_a, score_b, is_forfeit, reporter_discord_id, confirmer_discord_id, confirmed_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
-        `).run(matchId, winnerUser.id, scoreA, scoreB, isForfeit ? 1 : 0, interaction.user.id, interaction.user.id);
-
-        db.prepare(`UPDATE matches SET state = 'confirmed', ended_at = datetime('now') WHERE match_id = ?`).run(matchId);
-        db.prepare(`UPDATE fixtures SET status = 'confirmed', confirmed_at = datetime('now') WHERE fixture_id = ?`).run(match.fixture_id);
-
-        logAudit('admin_force_result', interaction.user.id, { matchId, winner: winnerUser.id, scoreA, scoreB, isForfeit, resultId: Number(ins.lastInsertRowid) });
         await interaction.reply({
-          content: `Forced result recorded: <@${winnerUser.id}> wins ${scoreA}-${scoreB}${isForfeit ? ' (FORFEIT)' : ''}. (result_id=${ins.lastInsertRowid})`,
+          content: 'Direct force-result is disabled. Use the reaction workflow on the match message: react ❗ then choose 🇦/🇧 and score emoji.',
           ephemeral: true,
         });
         return;
       }
+
 
 
       if (name === 'admin_dispute_match') {
