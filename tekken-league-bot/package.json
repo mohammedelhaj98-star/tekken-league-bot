@@ -9,7 +9,8 @@
     "start": "node src/index.js",
     "deploy": "node src/deploy-commands.js",
     "test": "node --test",
-    "check:syntax": "node --check src/index.js && node --check src/deploy-commands.js && node scripts/check-index-structure.js"
+    "check:syntax": "node --check src/index.js && node --check src/deploy-commands.js && node scripts/check-index-structure.js",
+    "repair:index": "node scripts/repair-index-from-head.js"
   },
   "dependencies": {
     "better-sqlite3": "^11.7.2",

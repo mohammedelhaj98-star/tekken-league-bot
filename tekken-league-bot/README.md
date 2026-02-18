@@ -92,6 +92,13 @@ npm ci
 pm2 restart tekken-league-bot --update-env
 ```
 
+If `src/index.js` ever gets locally corrupted by a bad merge/edit, restore it from the current commit and re-check syntax:
+
+```bash
+npm run repair:index
+npm run check:syntax
+```
+
 ## Tournament setup
 Use `/admin_setup_tournament` to configure the league before generating fixtures. You can set:
 - max players

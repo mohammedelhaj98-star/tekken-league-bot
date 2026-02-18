@@ -1358,6 +1358,16 @@ function invokeMatchmakingTickSafely() {
   });
 }
 
+function invokeMatchmakingTickSafely() {
+  if (typeof runMatchmakingTick !== 'function') {
+    console.error('Matchmaking tick skipped: runMatchmakingTick is not defined');
+    return;
+  }
+  runMatchmakingTick().catch((err) => {
+    console.error('Background matchmaking tick failed:', err);
+  });
+}
+
 client.once(Events.ClientReady, () => {
   console.log(`Logged in as ${client.user.tag}`);
 
@@ -1750,6 +1760,8 @@ ${lines.join('\n')}`, ephemeral: false });
           await interaction.reply({ content: 'Both selected users must be signed up.', ephemeral: true });
           return;
         }
+        return;
+      }
 
         const eligibleOpponentIds = getEligibleOpponentsForPlayer(playerA.id).map((row) => row.opponent_id);
         if (!eligibleOpponentIds.includes(playerB.id)) {
@@ -1762,8 +1774,6 @@ ${lines.join('\n')}`, ephemeral: false });
           });
           return;
         }
-        return;
-      }
 
         const fixture = getNextUnplayedFixtureBetween(playerA.id, playerB.id);
         if (!fixture) {
