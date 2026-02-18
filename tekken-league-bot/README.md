@@ -107,6 +107,7 @@ Signup/check-in/ready activity notifications can be routed via `/bot_settings se
 - Players have an allowance of up to 5 missed check-ins; players who finish all required fixtures early are exempt from further check-ins.
 - The table now includes a legend describing each header before the table output.
 - The table now includes `GP` (games played).
+- `/table` supports pagination: react with ◀️ / ▶️ on the table message to scroll all pages.
 
 
 ## Automatic queue matching
