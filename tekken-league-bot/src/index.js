@@ -1348,6 +1348,16 @@ function invokeMatchmakingTickSafely() {
   });
 }
 
+function invokeMatchmakingTickSafely() {
+  if (typeof runMatchmakingTick !== 'function') {
+    console.error('Matchmaking tick skipped: runMatchmakingTick is not defined');
+    return;
+  }
+  runMatchmakingTick().catch((err) => {
+    console.error('Background matchmaking tick failed:', err);
+  });
+}
+
 client.once(Events.ClientReady, () => {
   console.log(`Logged in as ${client.user.tag}`);
 
@@ -2191,6 +2201,34 @@ ${buildTournamentSettingsMessage()}`,
           return;
         }
 
+        const matchId = interaction.options.getInteger('match_id', true);
+        const reason = (interaction.options.getString('reason') || 'Manual admin dispute').trim();
+        const match = db.prepare('SELECT * FROM matches WHERE match_id = ?').get(matchId);
+        if (!match) {
+          await interaction.reply({ content: 'Match not found.', ephemeral: true });
+          return;
+        }
+
+        db.prepare("UPDATE matches SET state = 'disputed' WHERE match_id = ?").run(matchId);
+        logAudit('admin_dispute_match', interaction.user.id, { matchId, reason });
+
+        const gs = getGuildSettings(interaction.guildId);
+        await sendDisputeNotification(
+          interaction.guild,
+          gs,
+          `⚠️ Admin marked match ${matchId} as disputed. Reason: ${reason}. Review channel: <#${match.match_channel_id || gs.results_channel_id || ''}>`
+        );
+
+        await interaction.reply({ content: `Match ${matchId} marked as disputed.`, ephemeral: true });
+        return;
+      }
+
+      if (name === 'admin_void_match') {
+        if (!isAdmin(interaction)) {
+          await interaction.reply({ content: 'Admin only.', ephemeral: true });
+          return;
+        }
+
         const rules = normalizePointRules({
           points_win: interaction.options.getInteger('win', true),
           points_loss: interaction.options.getInteger('loss', true),
@@ -2316,6 +2354,7 @@ ${buildTournamentSettingsMessage()}`,
         });
         return;
       }
+    }
 
   } catch (err) {
     console.error(err);

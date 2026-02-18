@@ -46,3 +46,10 @@ test('index.js keeps exactly one primary discord event wiring for key handlers',
   assert.equal(reactionAddCount, 1, 'Expected exactly one MessageReactionAdd handler.');
   assert.equal(reactionRemoveCount, 1, 'Expected exactly one MessageReactionRemove handler.');
 });
+
+test('interaction handler is explicitly async (await-safe)', () => {
+  const indexText = fs.readFileSync('src/index.js', 'utf8');
+  const asyncInteractionHandler = /client\.on\(Events\.InteractionCreate,\s*async\s*\(interaction\)\s*=>\s*\{/g;
+  const matches = indexText.match(asyncInteractionHandler) || [];
+  assert.equal(matches.length, 1, 'Expected one async InteractionCreate handler declaration.');
+});
