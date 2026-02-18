@@ -8,12 +8,10 @@ const {
   TextInputBuilder,
   TextInputStyle,
   ActionRowBuilder,
-  ButtonBuilder,
-  ButtonStyle,
   PermissionsBitField,
-  ThreadAutoArchiveDuration,
   Partials,
 } = require('discord.js');
+const { randomBytes } = require('node:crypto');
 
 const { openDb, initDb } = require('./db');
 const { encryptString, decryptString, maskEmail, maskPhone } = require('./crypto');
@@ -128,7 +126,6 @@ function runLeagueReset(level) {
       DELETE FROM admin_match_overrides;
       DELETE FROM match_reports;
       DELETE FROM results;
-      DELETE FROM pending_matches;
       DELETE FROM matches;
       DELETE FROM fixtures;
       DELETE FROM ready_queue;
@@ -143,7 +140,6 @@ function runLeagueReset(level) {
     DELETE FROM admin_match_overrides;
     DELETE FROM match_reports;
     DELETE FROM results;
-    DELETE FROM pending_matches;
     DELETE FROM matches;
     DELETE FROM fixtures;
     DELETE FROM ready_queue;
@@ -152,29 +148,15 @@ function runLeagueReset(level) {
   return 'Reset level: league (players preserved).';
 }
 
-const pendingResetConfirmations = new Map();
+const pendingResetTokens = new Map();
 
-async function startResetConfirmation(interaction, level, auditAction) {
-  const planned = `⚠️ Reset requested by ${interaction.user.tag} (${interaction.user.id}).
-${level === 'checkins' ? 'About to reset check-ins session (today attendance + queue).' : level === 'everything' ? 'About to reset EVERYTHING (including signups).' : 'About to reset league state (players preserved).'}`;
+function generateResetToken() {
+  return randomBytes(4).toString('hex').toUpperCase();
+}
 
-  await notifyAdminsAboutReset(interaction.guild, interaction.user, `${planned}
-Awaiting requester confirmation via DM reaction (✅/❌).`);
-
-  const dm = await interaction.user.send({
-    content: `${planned}
-
-React ✅ to confirm or ❌ to cancel. This expires in 5 minutes.`,
-  }).catch(() => null);
-
-  if (!dm) {
-    return { ok: false, message: 'I could not DM you for confirmation. Please enable DMs and try again.' };
-  }
-
-  await dm.react('✅').catch(() => null);
-  await dm.react('❌').catch(() => null);
-
-  pendingResetConfirmations.set(dm.id, {
+function createResetRequest(interaction, level, auditAction) {
+  const token = generateResetToken();
+  pendingResetTokens.set(token, {
     guildId: interaction.guildId,
     requestedByUserId: interaction.user.id,
     requesterTag: interaction.user.tag,
@@ -182,58 +164,19 @@ React ✅ to confirm or ❌ to cancel. This expires in 5 minutes.`,
     auditAction,
     expiresAt: Date.now() + (5 * 60 * 1000),
   });
-
-  return { ok: true, message: 'I sent you a DM confirmation prompt. React ✅ to execute reset or ❌ to cancel (expires in 5 minutes).' };
+  return token;
 }
 
-async function handleResetConfirmationReaction(reaction, user) {
-  if (user.bot) return false;
-  if (reaction.partial) await reaction.fetch().catch(() => null);
-
-  const pending = pendingResetConfirmations.get(reaction.message.id);
-  if (!pending) return false;
-
-  const emoji = reaction.emoji?.name;
-
-  if (user.id !== pending.requestedByUserId) {
-    await reaction.users.remove(user.id).catch(() => null);
-    return true;
-  }
-
+function consumeResetToken(token) {
+  const normalized = String(token || '').trim().toUpperCase();
+  const pending = pendingResetTokens.get(normalized);
+  if (!pending) return { ok: false, error: 'Invalid reset token.' };
   if (Date.now() > pending.expiresAt) {
-    pendingResetConfirmations.delete(reaction.message.id);
-    await user.send('Reset confirmation expired. Please run the reset command again.').catch(() => null);
-    return true;
+    pendingResetTokens.delete(normalized);
+    return { ok: false, error: 'Reset token expired. Run /admin_reset again.' };
   }
-
-  if (emoji !== '✅' && emoji !== '❌') {
-    await reaction.users.remove(user.id).catch(() => null);
-    return true;
-  }
-
-  const guild = client.guilds.cache.get(pending.guildId) || await client.guilds.fetch(pending.guildId).catch(() => null);
-  if (!guild) {
-    pendingResetConfirmations.delete(reaction.message.id);
-    await user.send('Could not resolve guild for reset confirmation. Please run the command again.').catch(() => null);
-    return true;
-  }
-
-  if (emoji === '❌') {
-    pendingResetConfirmations.delete(reaction.message.id);
-    await notifyAdminsAboutReset(guild, user, `🛑 Reset cancelled by ${pending.requesterTag} (${pending.requestedByUserId}).`);
-    await user.send('Reset cancelled.').catch(() => null);
-    return true;
-  }
-
-  const summary = runLeagueReset(pending.level);
-  logAudit(pending.auditAction, pending.requestedByUserId, { level: pending.level, summary, confirmed_via: 'dm_reaction' });
-  pendingResetConfirmations.delete(reaction.message.id);
-
-  await notifyAdminsAboutReset(guild, user, `✅ Reset completed by ${pending.requesterTag} (${pending.requestedByUserId}).
-${summary}`);
-  await user.send(`Reset executed successfully.
-${summary}`).catch(() => null);
-  return true;
+  pendingResetTokens.delete(normalized);
+  return { ok: true, pending };
 }
 
 function getDisplayNameFromInteraction(interaction) {
@@ -348,6 +291,14 @@ async function sendActivityNotification(guild, settings, content) {
   await channel.send({ content }).catch(() => null);
 }
 
+async function sendAdminNotification(guild, settings, content) {
+  const channelId = settings.admin_channel_id || null;
+  if (!channelId) return;
+  const channel = await guild.channels.fetch(channelId).catch(() => null);
+  if (!channel || !channel.isTextBased()) return;
+  await channel.send({ content }).catch(() => null);
+}
+
 function scoreFromCode(format, code) {
   if (format === 'FT2') {
     if (code === 0) return [2, 0];
@@ -359,6 +310,13 @@ function scoreFromCode(format, code) {
     if (code === 2) return [3, 2];
   }
   return null;
+}
+
+function parseAdminScore(raw) {
+  const s = String(raw || '').trim();
+  const m = s.match(/^(3)\s*[-:]\s*([0-2])$/);
+  if (!m) return null;
+  return { winner: 3, loser: Number(m[2]) };
 }
 
 function daysBetweenInclusive(startDateIso, endDateIso) {
@@ -753,7 +711,7 @@ function hasActiveMatch(discord_user_id) {
     FROM matches m
     JOIN fixtures f ON f.fixture_id = m.fixture_id
     WHERE f.league_id = 1
-      AND m.state IN ('pending','reported','active','awaiting_confirmation','disputed')
+      AND m.state IN ('pending','reported','active','disputed')
       AND (m.player_a_discord_id = ? OR m.player_b_discord_id = ?)
     LIMIT 1
   `).get(discord_user_id, discord_user_id);
@@ -794,42 +752,77 @@ async function createPendingMatch(fixture, channel, guildId) {
   const b = fixture.player_b_discord_id;
   const settings = getGuildSettings(guildId);
 
-  const res = db.prepare(`
-    INSERT INTO matches (league_id, guild_id, fixture_id, player_a_discord_id, player_b_discord_id, state, match_channel_id)
-    VALUES (1, ?, ?, ?, ?, 'pending', ?)
-  `).run(String(guildId), fixture.fixture_id, a, b, String(channel.id));
+  const lock = db.prepare(`
+    UPDATE fixtures
+    SET status = 'locked_in_match'
+    WHERE fixture_id = ? AND status = 'unplayed'
+  `).run(fixture.fixture_id);
 
-  const matchId = Number(res.lastInsertRowid);
-  const matchRow = db.prepare('SELECT * FROM matches WHERE match_id = ?').get(matchId);
-
-  const msg = await channel.send({
-    content: buildMatchAssignmentMessage(matchRow, settings, 'Pending'),
-    allowed_mentions: { users: [a, b], roles: [], replied_user: false },
-  });
-
-  // DM each player with their specific fixture details (best effort).
-  const dmText = [
-    `You have a new league fixture in **${settings.tournament_name || 'Tekken League'}**.`,
-    `Match ${matchRow.match_id}`,
-    `Player A: <@${a}> vs Player B: <@${b}>`,
-    `Please report in <#${channel.id}> using the reactions on the match message.`,
-  ].join('\n');
-
-  await channel.client.users.fetch(a).then(u => u.send(dmText)).catch(() => null);
-  await channel.client.users.fetch(b).then(u => u.send(dmText)).catch(() => null);
-
-  await msg.react('🇦').catch(() => null);
-  await msg.react('🇧').catch(() => null);
-  await msg.react('❗').catch(() => null);
-  for (const emoji of getScoreReactionsForFormat(settings.match_format)) {
-    await msg.react(emoji).catch(() => null);
+  if (lock.changes !== 1) {
+    return { ok: false, reason: 'fixture_already_locked' };
   }
 
-  db.prepare('UPDATE matches SET match_message_id = ? WHERE match_id = ?').run(String(msg.id), matchId);
-  db.prepare(`UPDATE fixtures SET status = 'locked_in_match' WHERE fixture_id = ?`).run(fixture.fixture_id);
-  clearReadyQueueForUsers([a, b]);
+  let matchId = null;
+  try {
+    const res = db.prepare(`
+      INSERT INTO matches (league_id, guild_id, fixture_id, player_a_discord_id, player_b_discord_id, state, match_channel_id)
+      VALUES (1, ?, ?, ?, ?, 'pending', ?)
+    `).run(String(guildId), fixture.fixture_id, a, b, String(channel.id));
 
-  return { matchId, messageId: msg.id };
+    matchId = Number(res.lastInsertRowid);
+    const matchRow = db.prepare('SELECT * FROM matches WHERE match_id = ?').get(matchId);
+
+    const msg = await channel.send({
+      content: buildMatchAssignmentMessage(matchRow, settings, 'Pending'),
+      allowed_mentions: { users: [a, b], roles: [], replied_user: false },
+    });
+
+    // DM each player with their specific fixture details (best effort).
+    const dmText = [
+      `You have a new league fixture in **${settings.tournament_name || 'Tekken League'}**.`,
+      `Match ${matchRow.match_id}`,
+      `Player A: <@${a}> vs Player B: <@${b}>`,
+      `Please report in <#${channel.id}> using the reactions on the match message.`,
+    ].join('\n');
+
+    await channel.client.users.fetch(a).then(u => u.send(dmText)).catch(() => null);
+    await channel.client.users.fetch(b).then(u => u.send(dmText)).catch(() => null);
+
+    await msg.react('🇦').catch(() => null);
+    await msg.react('🇧').catch(() => null);
+    await msg.react('❗').catch(() => null);
+    for (const emoji of getScoreReactionsForFormat(settings.match_format)) {
+      await msg.react(emoji).catch(() => null);
+    }
+
+    db.prepare('UPDATE matches SET match_message_id = ? WHERE match_id = ?').run(String(msg.id), matchId);
+    clearReadyQueueForUsers([a, b]);
+
+    return { ok: true, matchId, messageId: msg.id };
+  } catch (err) {
+    db.prepare(`
+      UPDATE fixtures
+      SET status = 'unplayed'
+      WHERE fixture_id = ? AND status = 'locked_in_match'
+    `).run(fixture.fixture_id);
+
+    if (matchId) {
+      db.prepare(`
+        UPDATE matches
+        SET state = 'cancelled', ended_at = datetime('now')
+        WHERE match_id = ?
+      `).run(matchId);
+    }
+
+    logAudit('match_post_failed', null, {
+      fixture_id: fixture.fixture_id,
+      guildId: String(guildId || ''),
+      channelId: String(channel?.id || ''),
+      error: String(err?.message || err),
+    });
+
+    return { ok: false, reason: 'message_post_failed' };
+  }
 }
 
 async function tryMatchmake(guild) {
@@ -859,322 +852,23 @@ async function tryMatchmake(guild) {
     const fixture = pickNextFixtureBetweenReadyPlayers(pool);
     if (!fixture) break;
 
-    await createPendingMatch(fixture, channel, guild.id);
-    pool = pool.filter(id => id !== fixture.player_a_discord_id && id !== fixture.player_b_discord_id);
-    made += 1;
+    const created = await createPendingMatch(fixture, channel, guild.id);
+    if (created.ok) {
+      pool = pool.filter(id => id !== fixture.player_a_discord_id && id !== fixture.player_b_discord_id);
+      made += 1;
+      continue;
+    }
+    if (created.reason === 'fixture_already_locked') {
+      continue;
+    }
+    logAudit('matchmaking_create_pending_failed', null, { guildId: guild.id, fixtureId: fixture.fixture_id, reason: created.reason });
+    continue;
   }
 
   if (made === 0) {
     logAudit('matchmaking_no_fixture', null, { guildId: guild.id, readyCount: ready.length });
   }
 }
-
-async function startMatchThreadFromPending(pendingId, interaction) {
-  const pending = db.prepare('SELECT * FROM pending_matches WHERE pending_id = ?').get(pendingId);
-  if (!pending) {
-    await interaction.reply({ content: 'This match request no longer exists.', ephemeral: true });
-    return;
-  }
-
-  const match = db.prepare(`
-    SELECT * FROM matches WHERE league_id = 1 AND fixture_id = ? ORDER BY match_id DESC LIMIT 1
-  `).get(pending.fixture_id);
-  if (!match) {
-    await interaction.reply({ content: 'Internal error: match record missing.', ephemeral: true });
-    return;
-  }
-
-  // Only create thread when both accepted
-  if (!(pending.accept_a && pending.accept_b)) return;
-
-  // Fetch the original message and start a thread
-  const channel = await interaction.guild.channels.fetch(pending.channel_id).catch(() => null);
-  if (!channel || !channel.isTextBased()) {
-    await interaction.reply({ content: 'Cannot create thread: match channel not found.', ephemeral: true });
-    return;
-  }
-
-  const msg = await channel.messages.fetch(pending.message_id).catch(() => null);
-  if (!msg) {
-    await interaction.reply({ content: 'Cannot create thread: match message not found.', ephemeral: true });
-    return;
-  }
-
-  const fixture = db.prepare('SELECT * FROM fixtures WHERE fixture_id = ?').get(pending.fixture_id);
-  const threadName = `Match: ${pending.player_a_discord_id.slice(-4)} vs ${pending.player_b_discord_id.slice(-4)} (Leg ${fixture.leg_number}/2)`;
-
-  const thread = await msg.startThread({
-    name: threadName,
-    autoArchiveDuration: ThreadAutoArchiveDuration.OneDay,
-  });
-
-  db.prepare(`
-    UPDATE matches SET state = 'active', thread_id = ? WHERE match_id = ?
-  `).run(String(thread.id), match.match_id);
-
-  // Add control buttons inside thread
-  const controls = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId(`report:${match.match_id}`).setLabel('Report Result').setStyle(ButtonStyle.Primary),
-    new ButtonBuilder().setCustomId(`forfeit:${match.match_id}`).setLabel('Claim Forfeit').setStyle(ButtonStyle.Secondary),
-  );
-
-  await thread.send({
-    content: `**Official BO5 (First to 3)**\nPlayers: <@${pending.player_a_discord_id}> vs <@${pending.player_b_discord_id}>\n\nWhen finished, click **Report Result**. Opponent must confirm.`,
-    components: [controls],
-    allowed_mentions: { users: [pending.player_a_discord_id, pending.player_b_discord_id], roles: [], replied_user: false },
-  });
-
-  // Disable buttons on the original request message
-  await msg.edit({ components: [] }).catch(() => null);
-
-  // Remove pending row
-  db.prepare('DELETE FROM pending_matches WHERE pending_id = ?').run(pendingId);
-}
-
-function parseScoreInput(raw) {
-  const s = String(raw || '').trim();
-  // Accept formats like "3-1" or "3:1"
-  const m = s.match(/^(3)\s*[-:]\s*([0-2])$/);
-  if (!m) return null;
-  return { winner: 3, loser: Number(m[2]) };
-}
-
-function parseWinnerInput(raw, playerAId, playerBId) {
-  const s = String(raw || '').trim().toLowerCase();
-  if (s === 'a' || s === '1') return playerAId;
-  if (s === 'b' || s === '2') return playerBId;
-  if (s === playerAId) return playerAId;
-  if (s === playerBId) return playerBId;
-  return null;
-}
-
-async function handleReportModalSubmit(interaction, matchId) {
-  const match = db.prepare('SELECT * FROM matches WHERE match_id = ?').get(matchId);
-  if (!match) {
-    await interaction.reply({ content: 'Match not found.', ephemeral: true });
-    return;
-  }
-
-  const existing = db.prepare('SELECT * FROM results WHERE match_id = ? AND confirmed_at IS NULL').get(matchId);
-  if (existing) {
-    await interaction.reply({ content: 'A result is already awaiting confirmation for this match.', ephemeral: true });
-    return;
-  }
-
-  const scoreRaw = interaction.fields.getTextInputValue('score');
-  const winnerRaw = interaction.fields.getTextInputValue('winner');
-
-  const score = parseScoreInput(scoreRaw);
-  if (!score) {
-    await interaction.reply({ content: 'Invalid score. Use 3-0, 3-1, or 3-2.', ephemeral: true });
-    return;
-  }
-
-  const winnerId = parseWinnerInput(winnerRaw, match.player_a_discord_id, match.player_b_discord_id);
-  if (!winnerId) {
-    await interaction.reply({ content: 'Invalid winner. Type A or B (see the thread message for who is A/B).', ephemeral: true });
-    return;
-  }
-
-  // Convert to score_a / score_b
-  let scoreA = 0;
-  let scoreB = 0;
-  if (winnerId === match.player_a_discord_id) {
-    scoreA = 3;
-    scoreB = score.loser;
-  } else {
-    scoreA = score.loser;
-    scoreB = 3;
-  }
-
-  const ins = db.prepare(`
-    INSERT INTO results (match_id, winner_discord_id, score_a, score_b, is_forfeit, reporter_discord_id)
-    VALUES (?, ?, ?, ?, 0, ?)
-  `).run(matchId, winnerId, scoreA, scoreB, interaction.user.id);
-
-  const resultId = ins.lastInsertRowid;
-
-  db.prepare(`UPDATE matches SET state = 'awaiting_confirmation' WHERE match_id = ?`).run(matchId);
-
-  const opponentId = (interaction.user.id === match.player_a_discord_id) ? match.player_b_discord_id : match.player_a_discord_id;
-
-  const row = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId(`confirm:${resultId}`).setLabel('Confirm').setStyle(ButtonStyle.Success),
-    new ButtonBuilder().setCustomId(`dispute:${resultId}`).setLabel('Dispute').setStyle(ButtonStyle.Danger),
-  );
-
-  await interaction.reply({ content: 'Result submitted. Waiting for opponent confirmation.', ephemeral: true });
-
-  // Post confirmation request in thread
-  const thread = interaction.channel;
-  await thread.send({
-    content: `Match ${matchId}\nResult reported: **<@${winnerId}> wins ${scoreA}-${scoreB}**\nOpponent <@${opponentId}>: please **Confirm** or **Dispute**.`,
-    components: [row],
-    allowed_mentions: { users: [opponentId], roles: [], replied_user: false },
-  });
-}
-
-async function handleForfeitClaim(interaction, matchId) {
-  const match = db.prepare('SELECT * FROM matches WHERE match_id = ?').get(matchId);
-  if (!match) {
-    await interaction.reply({ content: 'Match not found.', ephemeral: true });
-    return;
-  }
-
-  if (![match.player_a_discord_id, match.player_b_discord_id].includes(interaction.user.id)) {
-    await interaction.reply({ content: 'Only the players in this match can claim a forfeit.', ephemeral: true });
-    return;
-  }
-
-  const already = db.prepare('SELECT * FROM results WHERE match_id = ? AND confirmed_at IS NULL').get(matchId);
-  if (already) {
-    await interaction.reply({ content: 'A result is already awaiting confirmation for this match.', ephemeral: true });
-    return;
-  }
-
-  const winnerId = interaction.user.id;
-  const scoreA = (winnerId === match.player_a_discord_id) ? 3 : 0;
-  const scoreB = (winnerId === match.player_b_discord_id) ? 3 : 0;
-
-  const ins = db.prepare(`
-    INSERT INTO results (match_id, winner_discord_id, score_a, score_b, is_forfeit, reporter_discord_id)
-    VALUES (?, ?, ?, ?, 1, ?)
-  `).run(matchId, winnerId, scoreA, scoreB, interaction.user.id);
-
-  const resultId = ins.lastInsertRowid;
-  db.prepare(`UPDATE matches SET state = 'awaiting_confirmation' WHERE match_id = ?`).run(matchId);
-
-  const opponentId = (winnerId === match.player_a_discord_id) ? match.player_b_discord_id : match.player_a_discord_id;
-
-  const row = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId(`confirm:${resultId}`).setLabel('Confirm Forfeit').setStyle(ButtonStyle.Success),
-    new ButtonBuilder().setCustomId(`dispute:${resultId}`).setLabel('Dispute').setStyle(ButtonStyle.Danger),
-  );
-
-  await interaction.reply({ content: 'Forfeit claimed. Waiting for opponent confirmation.', ephemeral: true });
-
-  await interaction.channel.send({
-    content: `Match ${matchId}\nForfeit claimed by <@${winnerId}>. If confirmed, it will be recorded as **3-0** and **3 points** for the winner.\nOpponent <@${opponentId}>: confirm or dispute.`,
-    components: [row],
-    allowed_mentions: { users: [opponentId], roles: [], replied_user: false },
-  });
-}
-
-async function finalizeResult(interaction, resultId, action) {
-  const result = db.prepare(`
-    SELECT r.*, m.player_a_discord_id, m.player_b_discord_id, m.fixture_id
-    FROM results r
-    JOIN matches m ON m.match_id = r.match_id
-    WHERE r.result_id = ?
-  `).get(resultId);
-
-  if (!result) {
-    await interaction.reply({ content: 'Result not found.', ephemeral: true });
-    return;
-  }
-
-  const A = result.player_a_discord_id;
-  const B = result.player_b_discord_id;
-  const reporter = result.reporter_discord_id;
-  const opponent = (reporter === A) ? B : A;
-
-  if (![A, B].includes(interaction.user.id)) {
-    await interaction.reply({ content: 'Only players in this match can confirm/dispute.', ephemeral: true });
-    return;
-  }
-
-  if (interaction.user.id === reporter) {
-    await interaction.reply({ content: 'The reporter cannot confirm their own result. Opponent must confirm.', ephemeral: true });
-    return;
-  }
-
-  if (action === 'dispute') {
-    db.prepare(`UPDATE matches SET state = 'disputed' WHERE match_id = ?`).run(result.match_id);
-    const settings = getGuildSettings(interaction.guildId);
-    await sendDisputeNotification(interaction.guild, settings, `⚠️ Match ${result.match_id} was disputed by <@${interaction.user.id}>. Please review in <#${interaction.channelId}>.`);
-    await interaction.reply({ content: `Marked match ${result.match_id} as disputed. An organizer will review.`, ephemeral: true });
-    await interaction.message.edit({ components: [] }).catch(() => null);
-    return;
-  }
-
-  // Confirm
-  db.prepare(`
-    UPDATE results
-    SET confirmer_discord_id = ?, confirmed_at = datetime('now')
-    WHERE result_id = ?
-  `).run(interaction.user.id, resultId);
-
-  db.prepare(`UPDATE matches SET state = 'confirmed', ended_at = datetime('now') WHERE match_id = ?`).run(result.match_id);
-  db.prepare(`UPDATE fixtures SET status = 'confirmed', confirmed_at = datetime('now') WHERE fixture_id = ?`).run(result.fixture_id);
-
-  await interaction.reply({ content: 'Result confirmed.', ephemeral: true });
-  await interaction.message.edit({ components: [] }).catch(() => null);
-
-  // Offer immediate second leg if still available
-  const remaining = db.prepare(`
-    SELECT fixture_id, leg_number
-    FROM fixtures
-    WHERE league_id = 1
-      AND status = 'unplayed'
-      AND ((player_a_discord_id = ? AND player_b_discord_id = ?) OR (player_a_discord_id = ? AND player_b_discord_id = ?))
-    ORDER BY leg_number ASC
-    LIMIT 1
-  `).get(A, B, B, A);
-
-  if (remaining) {
-    const row = new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId(`secondleg:${A}:${B}:${remaining.fixture_id}`).setLabel('Play second leg now').setStyle(ButtonStyle.Primary),
-    );
-
-    await interaction.channel.send({
-      content: `Second leg is still available for <@${A}> vs <@${B}>. If you both want to play it now, click the button.`,
-      components: [row],
-      allowed_mentions: { users: [A, B], roles: [], replied_user: false },
-    });
-  }
-}
-
-async function handleSecondLegStart(interaction, A, B, fixtureId) {
-  if (![A, B].includes(interaction.user.id)) {
-    await interaction.reply({ content: 'Only the two players can start the second leg.', ephemeral: true });
-    return;
-  }
-
-  // Track two-step acceptance for starting second leg
-  const key = `secondleg_accept:${fixtureId}`;
-  const existing = db.prepare(`SELECT payload_json FROM audit_log WHERE league_id = 1 AND action_type = ? ORDER BY audit_id DESC LIMIT 1`).get(key);
-  let payload = existing ? JSON.parse(existing.payload_json) : { fixtureId: Number(fixtureId), A, B, clicks: {} };
-  payload.clicks[interaction.user.id] = true;
-
-  db.prepare(`INSERT INTO audit_log (league_id, actor_discord_id, action_type, payload_json) VALUES (1, ?, ?, ?)`).run(
-    interaction.user.id,
-    key,
-    JSON.stringify(payload),
-  );
-
-  if (payload.clicks[A] && payload.clicks[B]) {
-    // Both agreed: create pending match immediately
-    const fixture = db.prepare(`SELECT * FROM fixtures WHERE fixture_id = ? AND status = 'unplayed'`).get(fixtureId);
-    if (!fixture) {
-      await interaction.reply({ content: 'Second leg is no longer available.', ephemeral: true });
-      await interaction.message.edit({ components: [] }).catch(() => null);
-      return;
-    }
-
-    const channel = await interaction.guild.channels.fetch(MATCH_CHANNEL_ID).catch(() => null);
-    if (!channel || !channel.isTextBased()) {
-      await interaction.reply({ content: 'Match channel not found.', ephemeral: true });
-      return;
-    }
-
-    await createPendingMatch(fixture, channel);
-    await interaction.reply({ content: 'Second leg match request created in the match channel.', ephemeral: true });
-    await interaction.message.edit({ components: [] }).catch(() => null);
-  } else {
-    await interaction.reply({ content: 'Waiting for the other player to click too.', ephemeral: true });
-  }
-}
-
 
 function getMatchByMessage(guildId, channelId, messageId) {
   return db.prepare(`
@@ -1523,8 +1217,6 @@ async function handleReactionResultFlowRemove(reaction, user) {
 
 client.on(Events.MessageReactionAdd, async (reaction, user) => {
   try {
-    const handledReset = await handleResetConfirmationReaction(reaction, user);
-    if (handledReset) return;
     await handleReactionResultFlow(reaction, user);
   } catch (err) {
     console.error('Reaction flow error:', err);
@@ -1591,8 +1283,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
     const existing = getPlayer(interaction.user.id);
     if (existing) upsertLastSeenDisplayName(interaction.user.id, displayName);
 
-    if (interaction.isChatInputCommand()) {
-      const name = interaction.commandName;
+function upsertMatchReport(matchId, userId, patch) {
+  const existing = db.prepare('SELECT * FROM match_reports WHERE match_id = ? AND reporter_discord_id = ?').get(matchId, userId);
+  const winnerSide = patch.winner_side !== undefined ? patch.winner_side : (existing?.winner_side || null);
+  const scoreCode = patch.score_code !== undefined ? patch.score_code : (existing?.score_code ?? null);
 
       if (name === 'ping') {
         await interaction.reply({ content: 'pong' });
@@ -1656,16 +1350,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
         await interaction.reply({
           content: [
-            '**League Bot Quick Help**',
-            '• /signup — register or update your league profile',
-            "• /checkin — mark today's availability (attendance requirement)",
-            '• /ready and /unready — join/leave live matchmaking queue',
-            '• /queue — view current ready players',
-            '• /left — see who you still need to play and remaining matches',
-            '• /standings or /table — view live standings table anytime',
-            '• /matches — view recent match IDs and statuses',
-            '• /mydata — view your private stored profile details',
-            'Admins: /adminhelp, /points, /admin_vs, /bot_settings, /admin_status, /admin_player_matches, /admin_player_left, /admin_tournament_settings, /admin_setup_tournament, /admin_generate_fixtures, /admin_force_result, /admin_void_match, /admin_dispute_match, /admin_reset (DM confirm), /admin_reset_league',
+            `Real name: ${realName}`,
+            `Tekken tag: ${p.tekken_tag}`,
+            `Email: ${maskEmail(email)}`,
+            `Phone: ${maskPhone(phone)}`,
+            `Discord: ${p.discord_display_name_last_seen || p.discord_display_name_at_signup || interaction.user.username}`,
           ].join('\n'),
         });
         return;
@@ -1678,15 +1367,28 @@ client.on(Events.InteractionCreate, async (interaction) => {
           return;
         }
 
-        const rules = normalizePointRules({
-          points_win: interaction.options.getInteger('win', true),
-          points_loss: interaction.options.getInteger('loss', true),
-          points_no_show: interaction.options.getInteger('no_show', true),
-          points_sweep_bonus: interaction.options.getInteger('sweep_bonus', true),
-        });
+        const today = getTodayISO(true);
+        const existing = db.prepare(`
+          SELECT checked_in FROM attendance
+          WHERE league_id = 1 AND discord_user_id = ? AND date = ?
+        `).get(interaction.user.id, today);
+
+        db.prepare(`
+          INSERT INTO attendance (league_id, discord_user_id, date, checked_in, checked_in_at)
+          VALUES (1, ?, ?, 1, datetime('now'))
+          ON CONFLICT(league_id, discord_user_id, date)
+          DO UPDATE SET
+            checked_in = 1,
+            checked_in_at = datetime('now')
+        `).run(interaction.user.id, today);
 
         logAudit('checkin', interaction.user.id, { date: today });
         await sendActivityNotification(interaction.guild, getGuildSettings(interaction.guildId), `✅ Check-in: <@${interaction.user.id}> on ${today}.`).catch(() => null);
+        if (existing && Number(existing.checked_in) === 1) {
+          await interaction.reply({ content: `Already checked in for ${today}.` });
+          return;
+        }
+
         await interaction.reply({ content: `Checked in for ${today}.` });
         return;
       }
@@ -1804,7 +1506,7 @@ ${lines.join('\n')}`, ephemeral: false });
             '• /standings or /table — view live standings table anytime',
             '• /matches — view recent match IDs and statuses',
             '• /mydata — view your private stored profile details',
-            'Admins: /adminhelp, /points, /admin_vs, /bot_settings, /admin_status, /admin_player_matches, /admin_player_left, /admin_tournament_settings, /admin_setup_tournament, /admin_generate_fixtures, /admin_force_result, /admin_void_match, /admin_dispute_match, /admin_reset (DM confirm), /admin_reset_league',
+            'Admins: /adminhelp, /points, /admin_vs, /bot_settings, /admin_status, /admin_player_matches, /admin_player_left, /admin_tournament_settings, /admin_setup_tournament, /admin_generate_fixtures, /admin_force_result, /admin_void_match, /admin_dispute_match, /admin_reset, /admin_reset_confirm, /admin_reset_league',
           ].join('\n'),
         });
         return;
@@ -1848,7 +1550,8 @@ ${lines.join('\n')}`, ephemeral: false });
             '• /admin_force_result — force a result for no-show/dispute scenarios.',
             '• /admin_void_match — remove result and reopen fixture.',
             '• /admin_dispute_match — mark a match disputed and notify staff.',
-            '• /admin_reset and /admin_reset_league — dangerous reset flows (DM reaction confirm).',
+            '• /admin_reset and /admin_reset_league — request reset token (5 min expiry).',
+            '• /admin_reset_confirm — confirm pending reset with your token.',
           ].join('\n'),
           ephemeral: true,
         });
@@ -2034,6 +1737,215 @@ ${lines.join('\n')}`, ephemeral: false });
         const r = generateDoubleRoundRobinFixtures(db, 1);
         logAudit('admin_generate_fixtures', interaction.user.id, { ok: r.ok, message: r.message });
         await interaction.reply({ content: r.message, ephemeral: true });
+        return;
+      }
+
+
+
+
+
+      if (name === 'admin_status') {
+        if (!isAdmin(interaction)) {
+          await interaction.reply({ content: 'Admin only.', ephemeral: true });
+          return;
+        }
+
+        const players = db.prepare("SELECT COUNT(1) AS c FROM players WHERE league_id = 1 AND status = 'active'").get().c;
+        const fixtures = db.prepare("SELECT COUNT(1) AS c FROM fixtures WHERE league_id = 1").get().c;
+        const confirmedFixtures = db.prepare("SELECT COUNT(1) AS c FROM fixtures WHERE league_id = 1 AND status = 'confirmed'").get().c;
+        const queueCount = db.prepare('SELECT COUNT(1) AS c FROM ready_queue WHERE league_id = 1').get().c;
+        const activeMatches = db.prepare("SELECT COUNT(1) AS c FROM matches WHERE league_id = 1 AND state IN ('pending','reported','active','disputed')").get().c;
+
+        await interaction.reply({
+          content: [
+            '**League Admin Status**',
+            `Players (active): ${players}`,
+            `Fixtures: ${fixtures} total / ${confirmedFixtures} confirmed`,
+            `Ready queue: ${queueCount}`,
+            `Open matches: ${activeMatches}`,
+          ].join('\n'),
+          ephemeral: true,
+        });
+        return;
+      }
+
+
+      if (name === 'admin_player_matches') {
+        if (!isAdmin(interaction)) {
+          await interaction.reply({ content: 'Admin only.', ephemeral: true });
+          return;
+        }
+
+        const target = interaction.options.getUser('player', true);
+        await interaction.reply({ content: buildMatchesMessage(30, target.id), ephemeral: true });
+        return;
+      }
+
+      if (name === 'admin_player_left') {
+        if (!isAdmin(interaction)) {
+          await interaction.reply({ content: 'Admin only.', ephemeral: true });
+          return;
+        }
+
+        const target = interaction.options.getUser('player', true);
+        const p = getPlayer(target.id);
+        if (!p) {
+          await interaction.reply({ content: 'That user is not signed up in the league.', ephemeral: true });
+          return;
+        }
+
+        await interaction.reply({ content: buildLeftToPlayMessage(target.id), ephemeral: true });
+        return;
+      }
+
+      if (name === 'admin_tournament_settings') {
+        if (!isAdmin(interaction)) {
+          await interaction.reply({ content: 'Admin only.', ephemeral: true });
+          return;
+        }
+
+        await interaction.reply({ content: buildTournamentSettingsMessage(), ephemeral: true });
+        return;
+      }
+
+      if (name === 'admin_setup_tournament') {
+        if (!isAdmin(interaction)) {
+          await interaction.reply({ content: 'Admin only.', ephemeral: true });
+          return;
+        }
+
+        const maxPlayers = interaction.options.getInteger('max_players');
+        const timeslotCount = interaction.options.getInteger('timeslot_count');
+        const timeslotDurationMinutes = interaction.options.getInteger('timeslot_duration_minutes');
+        const timeSlotStartsRaw = interaction.options.getString('timeslot_starts');
+        const clearTimeslotStarts = interaction.options.getBoolean('clear_timeslot_starts') === true;
+        const totalTournamentDays = interaction.options.getInteger('total_tournament_days');
+        const minimumShowupPercent = interaction.options.getNumber('minimum_showup_percent');
+        const tournamentStartDateRaw = interaction.options.getString('tournament_start_date');
+
+        if (clearTimeslotStarts && timeSlotStartsRaw) {
+          await interaction.reply({
+            content: 'Use either `timeslot_starts` or `clear_timeslot_starts:true`, not both at the same time.',
+            ephemeral: true,
+          });
+          return;
+        }
+
+        const hasAnyUpdate = [maxPlayers, timeslotCount, timeslotDurationMinutes, timeSlotStartsRaw, totalTournamentDays, minimumShowupPercent, tournamentStartDateRaw]
+          .some(v => v !== null && v !== undefined);
+        if (!hasAnyUpdate && !clearTimeslotStarts) {
+          await interaction.reply({
+            content: `No values supplied.
+${buildTournamentSettingsMessage()}`,
+            ephemeral: true,
+          });
+          return;
+        }
+
+        const validated = validateTournamentSetupInput({
+          maxPlayers,
+          timeslotCount,
+          timeslotDurationMinutes,
+          timeSlotStartsRaw,
+          clearTimeslotStarts,
+          totalTournamentDays,
+          minimumShowupPercent,
+          tournamentStartDateRaw,
+        });
+
+        if (!validated.ok) {
+          await interaction.reply({ content: validated.error, ephemeral: true });
+          return;
+        }
+
+        const current = getLeagueSettings();
+        const merged = {
+          max_players: validated.values.max_players ?? current.max_players,
+          timeslot_count: validated.values.timeslot_count ?? current.timeslot_count,
+          timeslot_duration_minutes: validated.values.timeslot_duration_minutes ?? current.timeslot_duration_minutes,
+          timeslot_starts: validated.values.timeslot_starts ?? current.timeslot_starts,
+          season_days: validated.values.season_days ?? current.season_days,
+          eligibility_min_percent: validated.values.eligibility_min_percent ?? current.eligibility_min_percent,
+          tournament_start_date: validated.values.tournament_start_date ?? current.tournament_start_date,
+        };
+
+        if (clearTimeslotStarts && validated.values.timeslot_starts === '') {
+          merged.timeslot_starts = '';
+          merged.timeslot_count = 0;
+        }
+
+        const timeslotStartsList = String(merged.timeslot_starts || '').split(',').map((x) => x.trim()).filter(Boolean);
+        const isTimeslotConfigCleared = merged.timeslot_count === 0 && timeslotStartsList.length === 0;
+        if (!isTimeslotConfigCleared && timeslotStartsList.length !== merged.timeslot_count) {
+          await interaction.reply({
+            content: `No. of timeslots (${merged.timeslot_count}) must match start times count (${timeslotStartsList.length}).`,
+            ephemeral: true,
+          });
+          return;
+        }
+
+        merged.timeslot_starts = timeslotStartsList.join(',');
+
+        const minAttendanceDays = Math.ceil(merged.season_days * merged.eligibility_min_percent);
+
+        db.prepare(`
+          UPDATE leagues
+          SET
+            max_players = ?,
+            timeslot_count = ?,
+            timeslot_duration_minutes = ?,
+            timeslot_starts = ?,
+            season_days = ?,
+            eligibility_min_percent = ?,
+            attendance_min_days = ?,
+            tournament_start_date = ?
+          WHERE league_id = 1
+        `).run(
+          merged.max_players,
+          merged.timeslot_count,
+          merged.timeslot_duration_minutes,
+          merged.timeslot_starts,
+          merged.season_days,
+          merged.eligibility_min_percent,
+          minAttendanceDays,
+          merged.tournament_start_date,
+        );
+
+        logAudit('admin_setup_tournament', interaction.user.id, {
+          updated: validated.values,
+          computed_attendance_min_days: minAttendanceDays,
+        });
+        return;
+      }
+
+
+      if (name === 'helpplayer' || name === 'playerhelp') {
+        await interaction.reply({
+          content: `Tournament settings updated.
+${buildTournamentSettingsMessage()}`,
+          ephemeral: true,
+        });
+        return;
+      }
+
+      if (name === 'admin_reset') {
+        if (!isAdmin(interaction)) {
+          await interaction.reply({ content: 'Admin only.', ephemeral: true });
+          return;
+        }
+
+        const level = interaction.options.getString('level', true);
+        const token = createResetRequest(interaction, level, 'admin_reset');
+        const gs = getGuildSettings(interaction.guildId);
+        await sendAdminNotification(
+          interaction.guild,
+          gs,
+          `⚠️ Reset requested by ${interaction.user.tag} (${interaction.user.id}).\nLevel: ${level}. Awaiting /admin_reset_confirm by requester.`
+        ).catch(() => null);
+        await interaction.reply({
+          content: `Reset requested. To confirm, run /admin_reset_confirm token:${token} within 5 minutes.`,
+          ephemeral: true,
+        });
         return;
       }
 
@@ -2242,11 +2154,56 @@ ${buildTournamentSettingsMessage()}`,
           return;
         }
 
-        if (!interaction.deferred && !interaction.replied) {
-          await interaction.deferReply({ ephemeral: true });
+        const token = createResetRequest(interaction, 'league', 'admin_reset_league');
+        const gs = getGuildSettings(interaction.guildId);
+        await sendAdminNotification(
+          interaction.guild,
+          gs,
+          `⚠️ Reset requested by ${interaction.user.tag} (${interaction.user.id}).\nLevel: league. Awaiting /admin_reset_confirm by requester.`
+        ).catch(() => null);
+        await interaction.reply({
+          content: `Reset requested. To confirm, run /admin_reset_confirm token:${token} within 5 minutes.`,
+          ephemeral: true,
+        });
+        return;
+      }
+
+      if (name === 'admin_reset_confirm') {
+        if (!isAdmin(interaction)) {
+          await interaction.reply({ content: 'Admin only.', ephemeral: true });
+          return;
         }
-        const started = await startResetConfirmation(interaction, 'league', 'admin_reset_league');
-        await interaction.editReply({ content: started.message });
+
+        const token = interaction.options.getString('token', true);
+        const consumed = consumeResetToken(token);
+        if (!consumed.ok) {
+          await interaction.reply({ content: consumed.error, ephemeral: true });
+          return;
+        }
+
+        const pending = consumed.pending;
+        if (pending.requestedByUserId !== interaction.user.id) {
+          pendingResetTokens.set(String(token).trim().toUpperCase(), pending);
+          await interaction.reply({ content: 'Only the original requester can confirm this reset token.', ephemeral: true });
+          return;
+        }
+
+        const summary = runLeagueReset(pending.level);
+        logAudit(pending.auditAction, pending.requestedByUserId, {
+          level: pending.level,
+          summary,
+          confirmed_via: 'token_command',
+          token: String(token).trim().toUpperCase(),
+        });
+
+        const gs = getGuildSettings(interaction.guildId);
+        await sendAdminNotification(
+          interaction.guild,
+          gs,
+          `✅ Reset completed by ${interaction.user.tag} (${interaction.user.id}).\n${summary}`
+        ).catch(() => null);
+
+        await interaction.reply({ content: summary, ephemeral: true });
         return;
       }
 
@@ -2288,7 +2245,7 @@ ${buildTournamentSettingsMessage()}`,
           scoreA = winnerUser.id === match.player_a_discord_id ? 3 : 0;
           scoreB = winnerUser.id === match.player_b_discord_id ? 3 : 0;
         } else {
-          const parsed = parseScoreInput(scoreRaw);
+          const parsed = parseAdminScore(scoreRaw);
           if (!parsed) {
             await interaction.reply({ content: 'Invalid score. Use 3-0, 3-1, or 3-2.', ephemeral: true });
             return;
@@ -2395,7 +2352,8 @@ ${buildTournamentSettingsMessage()}`,
         const displayName = getDisplayNameFromInteraction(interaction);
 
         const existing = getPlayer(interaction.user.id);
-        if (!existing) {
+        const isNewSignup = !existing;
+        if (isNewSignup) {
           db.prepare(`
             INSERT INTO players (
               league_id,
@@ -2433,8 +2391,24 @@ ${buildTournamentSettingsMessage()}`,
           );
         }
 
-        logAudit('signup_upsert', interaction.user.id, { tekkenTag });
-        await sendActivityNotification(interaction.guild, getGuildSettings(interaction.guildId), `📝 Signup: <@${interaction.user.id}> registered/updated as **${tekkenTag}**.`).catch(() => null);
+        const gs = getGuildSettings(interaction.guildId);
+        await sendAdminNotification(
+          interaction.guild,
+          gs,
+          [
+            `📥 **Signup ${isNewSignup ? 'NEW' : 'UPDATE'}**`,
+            `User: <@${interaction.user.id}> (${interaction.user.id})`,
+            `Discord username: ${interaction.user.username}`,
+            `Display name: ${displayName}`,
+            `Real name: ${realName}`,
+            `Tekken tag: ${tekkenTag}`,
+            `Email: ${email}`,
+            `Phone: ${phone}`,
+          ].join('\n')
+        ).catch(() => null);
+
+        logAudit('signup_upsert', interaction.user.id, { tekkenTag, mode: isNewSignup ? 'new' : 'update' });
+        await sendActivityNotification(interaction.guild, gs, `📝 Signup: <@${interaction.user.id}> registered/updated as **${tekkenTag}**.`).catch(() => null);
         await interaction.reply({
           content: 'Signup saved. Use /checkin daily and /ready when you are free to play.',
           ephemeral: true,
@@ -2443,128 +2417,6 @@ ${buildTournamentSettingsMessage()}`,
       }
     }
 
-    if (interaction.isButton()) {
-      const [kind, rest] = interaction.customId.split(':');
-
-      if (kind === 'pend_accept' || kind === 'pend_decline') {
-        const pendingId = Number(rest);
-        const pending = db.prepare('SELECT * FROM pending_matches WHERE pending_id = ?').get(pendingId);
-        if (!pending) {
-          await interaction.reply({ content: 'This match request is no longer valid.', ephemeral: true });
-          return;
-        }
-
-        const a = pending.player_a_discord_id;
-        const b = pending.player_b_discord_id;
-        if (![a, b].includes(interaction.user.id)) {
-          await interaction.reply({ content: 'Only the matched players can respond.', ephemeral: true });
-          return;
-        }
-
-        if (kind === 'pend_decline') {
-          // Unlock fixture and clean up
-          db.prepare(`UPDATE fixtures SET status = 'unplayed' WHERE fixture_id = ?`).run(pending.fixture_id);
-          db.prepare(`DELETE FROM pending_matches WHERE pending_id = ?`).run(pendingId);
-          db.prepare(`UPDATE matches SET state = 'cancelled', ended_at = datetime('now') WHERE fixture_id = ? AND state='pending_accept'`).run(pending.fixture_id);
-
-          await interaction.reply({ content: 'Declined. You can /ready again when free.', ephemeral: true });
-
-          // Disable message buttons
-          await interaction.message.edit({ components: [] }).catch(() => null);
-          return;
-        }
-
-        // Accept
-        const col = interaction.user.id === a ? 'accept_a' : 'accept_b';
-        db.prepare(`UPDATE pending_matches SET ${col} = 1 WHERE pending_id = ?`).run(pendingId);
-
-        const updated = db.prepare('SELECT * FROM pending_matches WHERE pending_id = ?').get(pendingId);
-
-        await interaction.reply({ content: 'Accepted.', ephemeral: true });
-
-        if (updated.accept_a && updated.accept_b) {
-          await startMatchThreadFromPending(pendingId, interaction);
-        }
-        return;
-      }
-
-      if (kind === 'report') {
-        const matchId = Number(rest);
-        const match = db.prepare('SELECT * FROM matches WHERE match_id = ?').get(matchId);
-        if (!match) {
-          await interaction.reply({ content: 'Match not found.', ephemeral: true });
-          return;
-        }
-        if (![match.player_a_discord_id, match.player_b_discord_id].includes(interaction.user.id)) {
-          await interaction.reply({ content: 'Only the players can report results.', ephemeral: true });
-          return;
-        }
-
-        const modal = new ModalBuilder()
-          .setCustomId(`report_modal:${matchId}`)
-          .setTitle('Report BO5 Result');
-
-        const winner = new TextInputBuilder()
-          .setCustomId('winner')
-          .setLabel('Winner: type A or B')
-          .setPlaceholder(`A=<@${match.player_a_discord_id}>  B=<@${match.player_b_discord_id}>`)
-          .setStyle(TextInputStyle.Short)
-          .setRequired(true)
-          .setMaxLength(10);
-
-        const score = new TextInputBuilder()
-          .setCustomId('score')
-          .setLabel('Score (winner-loser): 3-0, 3-1, or 3-2')
-          .setStyle(TextInputStyle.Short)
-          .setRequired(true)
-          .setMaxLength(10);
-
-        modal.addComponents(
-          new ActionRowBuilder().addComponents(winner),
-          new ActionRowBuilder().addComponents(score),
-        );
-
-        await interaction.showModal(modal);
-        return;
-      }
-
-      if (kind === 'forfeit') {
-        const matchId = Number(rest);
-        await handleForfeitClaim(interaction, matchId);
-        return;
-      }
-
-      if (kind === 'confirm') {
-        const resultId = Number(rest);
-        await finalizeResult(interaction, resultId, 'confirm');
-        return;
-      }
-
-      if (kind === 'dispute') {
-        const resultId = Number(rest);
-        await finalizeResult(interaction, resultId, 'dispute');
-        return;
-      }
-
-      if (kind === 'secondleg') {
-        // customId: secondleg:A:B:fixtureId
-        const parts = interaction.customId.split(':');
-        const A = parts[1];
-        const B = parts[2];
-        const fixtureId = Number(parts[3]);
-        await handleSecondLegStart(interaction, A, B, fixtureId);
-        return;
-      }
-    }
-
-    if (interaction.isModalSubmit()) {
-      const [kind, matchIdRaw] = interaction.customId.split(':');
-      if (kind === 'report_modal') {
-        const matchId = Number(matchIdRaw);
-        await handleReportModalSubmit(interaction, matchId);
-        return;
-      }
-    }
   } catch (err) {
     console.error(err);
     try {

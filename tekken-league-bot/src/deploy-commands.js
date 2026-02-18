@@ -251,6 +251,15 @@ const commands = [
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 
   new SlashCommandBuilder()
+    .setName('admin_reset_confirm')
+    .setDescription('Admin: confirm a pending reset with token')
+    .addStringOption(o => o
+      .setName('token')
+      .setDescription('Reset confirmation token')
+      .setRequired(true))
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
+  new SlashCommandBuilder()
     .setName('admin_reset_league')
     .setDescription('Admin: reset fixtures + matches + results (dangerous)')
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),

@@ -59,7 +59,8 @@ Admins (requires Administrator permission in the server):
 - /admin_tournament_settings
 - /admin_setup_tournament
 - /admin_generate_fixtures
-- /admin_reset (levels: checkins | league | everything, DM reaction confirm)
+- /admin_reset (levels: checkins | league | everything, returns confirmation token)
+- /admin_reset_confirm (confirm a pending reset using token)
 - /admin_reset_league (legacy alias for league-level reset)
  - /admin_force_result
  - /admin_void_match
@@ -121,4 +122,4 @@ Signup/check-in/ready activity notifications can be routed via `/bot_settings se
 - Missing fixtures are auto-generated during matchmaking without duplicating historical pair/leg records.
 
 
-Each reset sends DM notifications to the requesting admin and all other admins, including who requested it and what level is being executed. Resets execute only after requester DM reaction confirmation (✅).
+Each reset requires token confirmation: run `/admin_reset` first, then `/admin_reset_confirm token:<TOKEN>` within 5 minutes (same requesting admin).
