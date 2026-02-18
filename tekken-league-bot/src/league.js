@@ -1,43 +1,73 @@
-const { nanoid } = require('nanoid');
+// Points rules are configurable per league row.
+function normalizePointRules(pointRules = {}) {
+  const toSafeInt = (v, fallback) => {
+    const n = Number(v);
+    if (!Number.isFinite(n)) return fallback;
+    return Math.max(0, Math.trunc(n));
+  };
 
-// Points rules (per user spec)
-function pointsForPlayedMatch(winnerScore, loserScore) {
-  // winnerScore is always 3, loserScore is 0..2
-  if (winnerScore === 3 && loserScore === 0) return 3; // clean win
-  return 2; // 3-1 or 3-2
+  return {
+    points_win: toSafeInt(pointRules.points_win, 2),
+    points_loss: toSafeInt(pointRules.points_loss, 1),
+    points_no_show: toSafeInt(pointRules.points_no_show, 3),
+    points_sweep_bonus: toSafeInt(pointRules.points_sweep_bonus, 1),
+  };
 }
 
-function calcMatchPoints({ score_a, score_b, winner_discord_id, player_a_discord_id, player_b_discord_id, is_forfeit }) {
+function pointsForPlayedMatch(winnerScore, loserScore, pointRules = {}) {
+  const rules = normalizePointRules(pointRules);
+  if (winnerScore > loserScore && loserScore === 0) {
+    return rules.points_win + rules.points_sweep_bonus;
+  }
+  return rules.points_win;
+}
+
+function calcMatchPoints({ score_a, score_b, winner_discord_id, player_a_discord_id, player_b_discord_id, is_forfeit }, pointRules = {}) {
   // Returns { pointsA, pointsB }
   const A = player_a_discord_id;
   const B = player_b_discord_id;
+  const rules = normalizePointRules(pointRules);
   if (is_forfeit) {
-    if (winner_discord_id === A) return { pointsA: 3, pointsB: 0 };
-    return { pointsA: 0, pointsB: 3 };
+    if (winner_discord_id === A) return { pointsA: rules.points_no_show, pointsB: 0 };
+    return { pointsA: 0, pointsB: rules.points_no_show };
   }
 
-  // Played match: loser always gets 1 point
   if (winner_discord_id === A) {
-    const winnerPts = pointsForPlayedMatch(score_a, score_b);
-    return { pointsA: winnerPts, pointsB: 1 };
-  } else {
-    const winnerPts = pointsForPlayedMatch(score_b, score_a);
-    return { pointsA: 1, pointsB: winnerPts };
+    const winnerPts = pointsForPlayedMatch(score_a, score_b, rules);
+    return { pointsA: winnerPts, pointsB: rules.points_loss };
   }
+
+  const winnerPts = pointsForPlayedMatch(score_b, score_a, rules);
+  return { pointsA: rules.points_loss, pointsB: winnerPts };
 }
 
 function generateDoubleRoundRobinFixtures(db, league_id = 1) {
-  const players = db.prepare(`SELECT discord_user_id FROM players WHERE league_id = ? AND status = 'active' ORDER BY discord_user_id`).all(league_id);
+  const players = db.prepare(`
+    SELECT discord_user_id
+    FROM players
+    WHERE league_id = ? AND status = 'active'
+    ORDER BY discord_user_id
+  `).all(league_id);
+
   if (players.length < 2) {
     return { ok: false, message: 'Need at least 2 signed-up players to generate fixtures.' };
   }
 
-  const existing = db.prepare('SELECT COUNT(1) AS c FROM fixtures WHERE league_id = ?').get(league_id).c;
-  if (existing > 0) {
-    return { ok: false, message: 'Fixtures already exist. Use /admin_reset_league if you really want to wipe and regenerate.' };
-  }
-
   const ids = players.map(p => p.discord_user_id);
+
+  // Keep full fixture history and only add missing pair/leg combinations.
+  const existing = db.prepare(`
+    SELECT player_a_discord_id, player_b_discord_id, leg_number
+    FROM fixtures
+    WHERE league_id = ?
+  `).all(league_id);
+
+  const existingKeys = new Set(existing.map((f) => {
+    const low = f.player_a_discord_id < f.player_b_discord_id ? f.player_a_discord_id : f.player_b_discord_id;
+    const high = f.player_a_discord_id < f.player_b_discord_id ? f.player_b_discord_id : f.player_a_discord_id;
+    return `${low}|${high}|${f.leg_number}`;
+  }));
+
   const insert = db.prepare(`
     INSERT INTO fixtures (league_id, player_a_discord_id, player_b_discord_id, leg_number)
     VALUES (?, ?, ?, ?)
@@ -49,16 +79,25 @@ function generateDoubleRoundRobinFixtures(db, league_id = 1) {
       for (let j = i + 1; j < ids.length; j++) {
         const a = ids[i];
         const b = ids[j];
-        insert.run(league_id, a, b, 1);
-        insert.run(league_id, a, b, 2);
-        count += 2;
+        for (const leg of [1, 2]) {
+          const key = `${a}|${b}|${leg}`;
+          if (existingKeys.has(key)) continue;
+          insert.run(league_id, a, b, leg);
+          existingKeys.add(key);
+          count += 1;
+        }
       }
     }
   });
   tx();
 
-  return { ok: true, message: `Generated ${count} fixtures (double round robin).` };
+  if (count === 0) {
+    return { ok: true, message: 'No new fixtures generated. All active player pairings already exist in fixture history.' };
+  }
+
+  return { ok: true, message: `Generated ${count} new fixtures (history preserved, no duplicate pair/leg).` };
 }
+
 
 function getTodayISO(qatarTime = true) {
   const now = new Date();
@@ -82,6 +121,15 @@ function getTodayISO(qatarTime = true) {
   return `${year}-${month}-${day}`;
 }
 
+function getLeaguePointRules(db, league_id = 1) {
+  const row = db.prepare(`
+    SELECT points_win, points_loss, points_no_show, points_sweep_bonus
+    FROM leagues
+    WHERE league_id = ?
+  `).get(league_id);
+  return normalizePointRules(row || {});
+}
+
 function computeStandings(db, league_id = 1) {
   // Build base rows
   const players = db.prepare(`
@@ -103,6 +151,8 @@ function computeStandings(db, league_id = 1) {
       games_lost: 0,
     });
   }
+
+  const pointRules = getLeaguePointRules(db, league_id);
 
   // Join confirmed results with match+fixture to get players
   const confirmed = db.prepare(`
@@ -144,7 +194,7 @@ function computeStandings(db, league_id = 1) {
       player_a_discord_id: r.player_a_discord_id,
       player_b_discord_id: r.player_b_discord_id,
       is_forfeit: r.is_forfeit,
-    });
+    }, pointRules);
 
     A.points += pts.pointsA;
     B.points += pts.pointsB;
@@ -202,4 +252,6 @@ module.exports = {
   getCompletionStats,
   calcMatchPoints,
   getTodayISO,
+  getLeaguePointRules,
+  normalizePointRules,
 };
