@@ -200,8 +200,10 @@ function initDb(db) {
     try {
       db.exec(alterSql);
     } catch (err) {
-      const msg = String(err?.message || '');
-      if (!msg.includes('non-constant default')) throw err;
+      const msg = String(err?.message || '').toLowerCase();
+      const isNonConstantDefaultError = msg.includes('non-constant default')
+        || msg.includes('cannot add a column with non-constant default');
+      if (!isNonConstantDefaultError) throw err;
 
       // Older SQLite builds reject expression defaults in ALTER TABLE ADD COLUMN.
       // Retry with a plain column definition, then backfill explicitly.
@@ -210,6 +212,7 @@ function initDb(db) {
         .replace(/\s+DEFAULT\s+CURRENT_[A-Z_]+/i, '')
         .replace(/\s+DEFAULT\s+'[^']*'/i, '')
         .replace(/\s+DEFAULT\s+"[^"]*"/i, '')
+        .replace(/\s+NOT\s+NULL/i, '')
         .trim();
 
       db.exec(`ALTER TABLE ${tableName} ADD COLUMN ${ddlWithoutDefault}`);
