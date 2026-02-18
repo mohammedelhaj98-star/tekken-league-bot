@@ -22,7 +22,7 @@ function initDb(db) {
       timezone TEXT NOT NULL DEFAULT 'Asia/Qatar',
       season_days INTEGER NOT NULL DEFAULT 20,
       attendance_min_days INTEGER NOT NULL DEFAULT 15,
-      tournament_start_date TEXT NOT NULL DEFAULT (date('now')),
+      tournament_start_date TEXT NOT NULL DEFAULT CURRENT_DATE,
       eligibility_min_percent REAL NOT NULL DEFAULT 0.75,
       points_win INTEGER NOT NULL DEFAULT 2,
       points_loss INTEGER NOT NULL DEFAULT 1,
@@ -198,7 +198,8 @@ function initDb(db) {
   }
 
   ensureColumn('leagues', 'max_players', 'max_players INTEGER NOT NULL DEFAULT 64');
-  ensureColumn('leagues', 'tournament_start_date', "tournament_start_date TEXT NOT NULL DEFAULT (date('now'))");
+  ensureColumn('leagues', 'tournament_start_date', 'tournament_start_date TEXT');
+  db.exec('UPDATE leagues SET tournament_start_date = COALESCE(tournament_start_date, CURRENT_DATE)');
   ensureColumn('leagues', 'points_win', 'points_win INTEGER NOT NULL DEFAULT 2');
   ensureColumn('leagues', 'points_loss', 'points_loss INTEGER NOT NULL DEFAULT 1');
   ensureColumn('leagues', 'points_no_show', 'points_no_show INTEGER NOT NULL DEFAULT 3');
