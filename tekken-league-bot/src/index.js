@@ -1380,10 +1380,8 @@ async function handleInteractionCreate(interaction) {
     const existing = getPlayer(interaction.user.id);
     if (existing) upsertLastSeenDisplayName(interaction.user.id, displayName);
 
-function upsertMatchReport(matchId, userId, patch) {
-  const existing = db.prepare('SELECT * FROM match_reports WHERE match_id = ? AND reporter_discord_id = ?').get(matchId, userId);
-  const winnerSide = patch.winner_side !== undefined ? patch.winner_side : (existing?.winner_side || null);
-  const scoreCode = patch.score_code !== undefined ? patch.score_code : (existing?.score_code ?? null);
+    if (interaction.isChatInputCommand()) {
+      const name = interaction.commandName;
 
       if (name === 'ping') {
         await interaction.reply({ content: 'pong' });
@@ -2245,7 +2243,6 @@ ${buildTournamentSettingsMessage()}`,
         ephemeral: true,
       });
       return;
-    }
 
     if (interaction.isModalSubmit()) {
       if (interaction.customId === 'signup_modal') {
@@ -2345,6 +2342,7 @@ ${buildTournamentSettingsMessage()}`,
         return;
       }
     }
+
 
   } catch (err) {
     console.error(err);
