@@ -109,7 +109,7 @@ Signup/check-in/ready activity notifications can be routed via `/bot_settings se
 - The table now includes a legend describing each header before the table output.
 - The table now includes `GP` (games played).
 - `ALLOW` now shows a plain number of missed-checkin days left (e.g. `5`), and `EXEMPT (5)` for finished players.
-- `/table` supports pagination: react with ◀️ / ▶️ on the table message to scroll all pages.
+- `/table` supports explicit paging via `/table page:<number>` (for example: `/table page:2`).
 - Match messages are pre-seeded with winner, score, and override reactions so users/admins can click immediately.
 
 

@@ -58,7 +58,12 @@ const commands = [
 
   new SlashCommandBuilder()
     .setName('table')
-    .setDescription('Alias for /standings'),
+    .setDescription('Show detailed standings table (optionally choose a page)')
+    .addIntegerOption(o => o
+      .setName('page')
+      .setDescription('Page number to display (default 1)')
+      .setRequired(false)
+      .setMinValue(1)),
 
   new SlashCommandBuilder()
     .setName('queue')
