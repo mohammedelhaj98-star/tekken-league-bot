@@ -1,27 +1,45 @@
 function isValidEmail(email) {
   if (!email) return false;
-  // Basic email validation (good enough for a league bot)
-  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim());
+  const normalized = String(email).trim().toLowerCase();
+  if (normalized.length > 254) return false;
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalized);
+}
+
+function normalizeEmail(email) {
+  return String(email || '').trim().toLowerCase();
+}
+
+function normalizePhone(phone) {
+  const raw = String(phone || '').trim();
+  if (!raw) return '';
+
+  const hasPlus = raw.startsWith('+');
+  const digits = raw.replace(/\D/g, '');
+
+  if (!digits) return '';
+  return hasPlus ? `+${digits}` : digits;
 }
 
 function isValidPhone(phone) {
   if (!phone) return false;
-  // Accept +country... or local digits; require at least 7 digits
-  const digits = phone.replace(/\D/g, '');
-  return digits.length >= 7;
+  const normalized = normalizePhone(phone);
+  const digits = normalized.replace(/\D/g, '');
+  return digits.length >= 7 && digits.length <= 15;
 }
 
 function cleanTekkenTag(tag) {
-  return String(tag || '').trim();
+  return String(tag || '').trim().replace(/\s+/g, ' ').slice(0, 40);
 }
 
 function cleanName(name) {
-  return String(name || '').trim();
+  return String(name || '').trim().replace(/\s+/g, ' ').slice(0, 80);
 }
 
 module.exports = {
   isValidEmail,
   isValidPhone,
+  normalizeEmail,
+  normalizePhone,
   cleanTekkenTag,
   cleanName,
 };
