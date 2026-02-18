@@ -2166,8 +2166,14 @@ ${buildTournamentSettingsMessage()}`,
           tournament_start_date: validated.values.tournament_start_date ?? current.tournament_start_date,
         };
 
+        if (clearTimeslotStarts && validated.values.timeslot_starts === '') {
+          merged.timeslot_starts = '';
+          merged.timeslot_count = 0;
+        }
+
         const timeslotStartsList = String(merged.timeslot_starts || '').split(',').map((x) => x.trim()).filter(Boolean);
-        if (timeslotStartsList.length !== merged.timeslot_count) {
+        const isTimeslotConfigCleared = merged.timeslot_count === 0 && timeslotStartsList.length === 0;
+        if (!isTimeslotConfigCleared && timeslotStartsList.length !== merged.timeslot_count) {
           await interaction.reply({
             content: `No. of timeslots (${merged.timeslot_count}) must match start times count (${timeslotStartsList.length}).`,
             ephemeral: true,
