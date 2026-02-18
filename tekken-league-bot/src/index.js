@@ -2360,8 +2360,8 @@ ${buildTournamentSettingsMessage()}`,
   }
 }
 
-client.on(Events.InteractionCreate, (interaction) => {
-  void handleInteractionCreate(interaction);
+client.on(Events.InteractionCreate, async (interaction) => {
+  await handleInteractionCreate(interaction);
 });
 
 function shutdown(signal) {
