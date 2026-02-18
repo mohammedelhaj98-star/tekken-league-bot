@@ -2199,12 +2199,6 @@ ${lines.join('\n')}`, ephemeral: false });
           points_sweep_bonus: interaction.options.getInteger('sweep_bonus', true),
         });
 
-        db.prepare(`
-          UPDATE leagues
-          SET points_win = ?, points_loss = ?, points_no_show = ?, points_sweep_bonus = ?
-          WHERE league_id = 1
-        `).run(rules.points_win, rules.points_loss, rules.points_no_show, rules.points_sweep_bonus);
-
         logAudit('checkin', interaction.user.id, { date: today });
         await sendActivityNotification(interaction.guild, getGuildSettings(interaction.guildId), `✅ Check-in: <@${interaction.user.id}> on ${today}.`).catch(() => null);
         await interaction.reply({ content: `Checked in for ${today}.` });
@@ -2727,7 +2721,9 @@ ${buildTournamentSettingsMessage()}`,
           return;
         }
 
-        await interaction.deferReply({ ephemeral: true });
+        if (!interaction.deferred && !interaction.replied) {
+          await interaction.deferReply({ ephemeral: true });
+        }
         const level = interaction.options.getString('level', true);
         const started = await startResetConfirmation(interaction, level, 'admin_reset');
         await interaction.editReply({ content: started.message });
@@ -2740,7 +2736,9 @@ ${buildTournamentSettingsMessage()}`,
           return;
         }
 
-        await interaction.deferReply({ ephemeral: true });
+        if (!interaction.deferred && !interaction.replied) {
+          await interaction.deferReply({ ephemeral: true });
+        }
         const started = await startResetConfirmation(interaction, 'league', 'admin_reset_league');
         await interaction.editReply({ content: started.message });
         return;

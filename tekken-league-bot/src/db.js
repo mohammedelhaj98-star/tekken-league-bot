@@ -194,7 +194,26 @@ function initDb(db) {
   function ensureColumn(tableName, columnName, ddl) {
     const cols = db.prepare(`PRAGMA table_info(${tableName})`).all();
     const exists = cols.some(c => c.name === columnName);
-    if (!exists) db.exec(`ALTER TABLE ${tableName} ADD COLUMN ${ddl}`);
+    if (exists) return;
+
+    const alterSql = `ALTER TABLE ${tableName} ADD COLUMN ${ddl}`;
+    try {
+      db.exec(alterSql);
+    } catch (err) {
+      const msg = String(err?.message || '');
+      if (!msg.includes('non-constant default')) throw err;
+
+      // Older SQLite builds reject expression defaults in ALTER TABLE ADD COLUMN.
+      // Retry with a plain column definition, then backfill explicitly.
+      const ddlWithoutDefault = ddl
+        .replace(/\s+DEFAULT\s*\([^)]*\)/i, '')
+        .replace(/\s+DEFAULT\s+CURRENT_[A-Z_]+/i, '')
+        .replace(/\s+DEFAULT\s+'[^']*'/i, '')
+        .replace(/\s+DEFAULT\s+"[^"]*"/i, '')
+        .trim();
+
+      db.exec(`ALTER TABLE ${tableName} ADD COLUMN ${ddlWithoutDefault}`);
+    }
   }
 
   ensureColumn('leagues', 'max_players', 'max_players INTEGER NOT NULL DEFAULT 64');
