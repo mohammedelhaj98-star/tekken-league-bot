@@ -1348,26 +1348,6 @@ function invokeMatchmakingTickSafely() {
   });
 }
 
-function invokeMatchmakingTickSafely() {
-  if (typeof runMatchmakingTick !== 'function') {
-    console.error('Matchmaking tick skipped: runMatchmakingTick is not defined');
-    return;
-  }
-  runMatchmakingTick().catch((err) => {
-    console.error('Background matchmaking tick failed:', err);
-  });
-}
-
-function invokeMatchmakingTickSafely() {
-  if (typeof runMatchmakingTick !== 'function') {
-    console.error('Matchmaking tick skipped: runMatchmakingTick is not defined');
-    return;
-  }
-  runMatchmakingTick().catch((err) => {
-    console.error('Background matchmaking tick failed:', err);
-  });
-}
-
 client.once(Events.ClientReady, () => {
   console.log(`Logged in as ${client.user.tag}`);
 
@@ -2027,7 +2007,7 @@ ${buildTournamentSettingsMessage()}`,
           tournament_start_date: validated.values.tournament_start_date ?? current.tournament_start_date,
         };
 
-        if (clearTimeslotStarts && validated.values.timeslot_starts === '') {
+        if (clearTimeslotStarts) {
           merged.timeslot_starts = '';
           merged.timeslot_count = 0;
         }
