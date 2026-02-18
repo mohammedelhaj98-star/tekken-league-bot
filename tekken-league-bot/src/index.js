@@ -363,6 +363,15 @@ function scoreFromCode(format, code) {
   return null;
 }
 
+function daysBetweenInclusive(startDateIso, endDateIso) {
+  const start = new Date(`${startDateIso}T00:00:00Z`);
+  const end = new Date(`${endDateIso}T00:00:00Z`);
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return 1;
+  const diffMs = end.getTime() - start.getTime();
+  const days = Math.floor(diffMs / (24 * 60 * 60 * 1000)) + 1;
+  return Math.max(1, days);
+}
+
 function buildMatchAssignmentMessage(match, settings, status = 'Pending', details = '') {
   const scoreGuide = settings.match_format === 'FT2'
     ? 'Score reactions: 0️⃣ = winner 2-0, 1️⃣ = winner 2-1'
@@ -509,8 +518,12 @@ function buildStandingsTablePages() {
 
   const league = getLeagueSettings();
   const seasonDays = Math.max(1, Number(league.season_days || 20));
+  const startDate = String(league.tournament_start_date || getTodayISO(true));
+  const today = getTodayISO(true);
+  const elapsedDays = Math.max(1, daysBetweenInclusive(startDate, today));
+  const tournamentDaysElapsed = Math.min(seasonDays, elapsedDays);
   const missedAllowance = 5;
-  const minCheckinsRequired = Math.max(0, seasonDays - missedAllowance);
+  const minCheckinsRequired = Math.max(0, tournamentDaysElapsed - missedAllowance);
   const activePlayerCount = db.prepare(`
     SELECT COUNT(1) AS c
     FROM players
@@ -538,14 +551,12 @@ function buildStandingsTablePages() {
   const attendanceById = new Map(attendanceRows.map((r) => [r.discord_user_id, Number(r.checkin_days || 0)]));
   const rows = standings.map((s, idx) => {
     const checkins = attendanceById.get(s.discord_user_id) || 0;
-    const missedDays = Math.max(0, seasonDays - checkins);
-    const showPct = Math.max(0, Math.min(100, Math.round(((seasonDays - missedDays) / seasonDays) * 100)));
+    const missedDays = Math.max(0, tournamentDaysElapsed - checkins);
+    const showPct = Math.max(0, Math.min(100, Math.round(((tournamentDaysElapsed - missedDays) / tournamentDaysElapsed) * 100)));
     const completed = completedByPlayer.get(s.discord_user_id) || 0;
     const finishedMatches = requiredFixturesPerPlayer > 0 && completed >= requiredFixturesPerPlayer;
     const allowanceRemaining = Math.max(0, missedAllowance - missedDays);
-    const allowanceText = finishedMatches
-      ? `EXEMPT (${allowanceRemaining}/${missedAllowance})`
-      : `${allowanceRemaining}/${missedAllowance}`;
+    const allowanceText = finishedMatches ? `EXEMPT (${allowanceRemaining})` : `${allowanceRemaining}`;
 
     return {
       rank: String(idx + 1),
@@ -581,7 +592,8 @@ function buildStandingsTablePages() {
 
   const legend = [
     'Legend: #=Rank | PLAYER=Tag | PTS=Points | GP=Games played | W/L=Wins/Losses | DIFF=Game diff | GW=Games won | SHOW%=Attendance | ALLOW=Missed check-ins left',
-    `Check-in allowance: max ${missedAllowance} misses (${minCheckinsRequired}/${seasonDays} minimum). Finished all fixtures early => EXEMPT.`,
+    `Attendance starts at 100% and decreases by missed days since start (${startDate}). Check-in allowance left is shown as a number (max ${missedAllowance}).`,
+    `Elapsed days: ${tournamentDaysElapsed}/${seasonDays}. Minimum check-ins now: ${minCheckinsRequired}. Finished all fixtures early => EXEMPT.`,
     '',
   ].join('\n');
 
@@ -668,6 +680,7 @@ function getLeagueSettings() {
       timezone,
       season_days,
       attendance_min_days,
+      tournament_start_date,
       eligibility_min_percent,
       points_win,
       points_loss,
@@ -691,6 +704,9 @@ function buildTournamentSettingsMessage() {
   const effectiveMinAttendanceDays = Math.max(minAttendanceDays, requiredByAllowance);
   const maxMissedDays = Math.max(0, (s.season_days || 0) - effectiveMinAttendanceDays);
   const dropPerDay = (s.season_days || 0) > 0 ? (100 / s.season_days).toFixed(2) : '0.00';
+  const startDate = String(s.tournament_start_date || getTodayISO(true));
+  const today = getTodayISO(true);
+  const elapsedDays = Math.max(1, Math.min(s.season_days || 0, daysBetweenInclusive(startDate, today)));
   const points = getLeaguePointRules(db, 1);
 
   return [
@@ -702,6 +718,8 @@ function buildTournamentSettingsMessage() {
     `Duration of Time slots: ${s.timeslot_duration_minutes} minutes`,
     `Start of each time slot: ${s.timeslot_starts}`,
     `Total tournament days: ${s.season_days}`,
+    `Tournament start date: ${startDate}`,
+    `Elapsed tournament days (for attendance): ${elapsedDays}`,
     `SHOW% behavior: starts at 100% and drops by ${dropPerDay}% per missed day`,
     `Minimum show up % required (eligibility threshold): ${minShowupPercent}%`,
     `Minimum check-in days required: ${effectiveMinAttendanceDays} (includes max ${missedAllowance} missed check-ins allowance)`,
@@ -846,6 +864,9 @@ async function createPendingMatch(fixture, channel, guildId) {
   await msg.react('🇦').catch(() => null);
   await msg.react('🇧').catch(() => null);
   await msg.react('❗').catch(() => null);
+  for (const emoji of getScoreReactionsForFormat(settings.match_format)) {
+    await msg.react(emoji).catch(() => null);
+  }
 
   db.prepare('UPDATE matches SET match_message_id = ? WHERE match_id = ?').run(String(msg.id), matchId);
   db.prepare(`UPDATE fixtures SET status = 'locked_in_match' WHERE fixture_id = ?`).run(fixture.fixture_id);
@@ -1659,6 +1680,398 @@ client.on(Events.InteractionCreate, async (interaction) => {
           new ActionRowBuilder().addComponents(phone),
         );
 
+async function reconcileFromPlayerReports(match, settings, guild) {
+  const adminOverride = getAdminOverride(match.match_id);
+
+  const reports = db.prepare('SELECT * FROM match_reports WHERE match_id = ?').all(match.match_id);
+  const ra = reports.find(r => r.reporter_discord_id === match.player_a_discord_id);
+  const rb = reports.find(r => r.reporter_discord_id === match.player_b_discord_id);
+
+  const completeA = ra && ra.winner_side && ra.score_code !== null && ra.score_code !== undefined;
+  const completeB = rb && rb.winner_side && rb.score_code !== null && rb.score_code !== undefined;
+
+  if (adminOverride?.active && adminOverride.winner_selected && adminOverride.winner_side && adminOverride.score_code !== null && adminOverride.score_code !== undefined) {
+    const winnerSide = adminOverride.winner_side;
+    const score = scoreFromCode(settings.match_format, Number(adminOverride.score_code));
+    if (!score) return;
+
+    let scoreA; let scoreB; let winnerId;
+    if (winnerSide === 'A') {
+      [scoreA, scoreB] = score;
+      winnerId = match.player_a_discord_id;
+    } else {
+      [scoreB, scoreA] = score;
+      winnerId = match.player_b_discord_id;
+    }
+
+    db.prepare('DELETE FROM results WHERE match_id = ?').run(match.match_id);
+    db.prepare(`
+      INSERT INTO results (match_id, winner_discord_id, score_a, score_b, is_forfeit, reporter_discord_id, confirmer_discord_id, confirmed_at)
+      VALUES (?, ?, ?, ?, 0, ?, ?, datetime('now'))
+    `).run(match.match_id, winnerId, scoreA, scoreB, adminOverride.admin_discord_id, adminOverride.admin_discord_id);
+
+    db.prepare("UPDATE matches SET state = 'confirmed', ended_at = datetime('now') WHERE match_id = ?").run(match.match_id);
+    db.prepare("UPDATE fixtures SET status = 'confirmed', confirmed_at = datetime('now') WHERE fixture_id = ?").run(match.fixture_id);
+
+    logAudit('admin_reaction_finalized_match', adminOverride.admin_discord_id, { matchId: match.match_id, winnerSide, scoreA, scoreB, via: 'exclamation_override' });
+    await editMatchMessage(guild, match.match_id, buildMatchAssignmentMessage(match, settings, 'Confirmed', `Final: ${scoreA}-${scoreB} (Admin override by <@${adminOverride.admin_discord_id}>)`));
+
+    const ch = await guild.channels.fetch(match.match_channel_id).catch(() => null);
+    if (ch && ch.isTextBased()) {
+      const msg = await ch.messages.fetch(match.match_message_id).catch(() => null);
+      if (msg) await msg.react('🔁').catch(() => null);
+    }
+    return;
+  }
+
+  if (!(completeA && completeB)) {
+    const anyReport = (ra && (ra.winner_side || ra.score_code !== null && ra.score_code !== undefined))
+      || (rb && (rb.winner_side || rb.score_code !== null && rb.score_code !== undefined));
+    db.prepare('DELETE FROM results WHERE match_id = ?').run(match.match_id);
+    db.prepare("UPDATE matches SET state = ?, ended_at = NULL WHERE match_id = ?").run(anyReport ? 'reported' : 'pending', match.match_id);
+    db.prepare("UPDATE fixtures SET status = 'locked_in_match', confirmed_at = NULL WHERE fixture_id = ?").run(match.fixture_id);
+
+    await editMatchMessage(guild, match.match_id, buildMatchAssignmentMessage(match, settings, anyReport ? 'Reported' : 'Pending', 'Awaiting winner + score from both players.'));
+    return;
+  }
+
+  if (ra.winner_side !== rb.winner_side || Number(ra.score_code) !== Number(rb.score_code)) {
+    db.prepare('DELETE FROM results WHERE match_id = ?').run(match.match_id);
+    db.prepare("UPDATE matches SET state = 'disputed', ended_at = NULL WHERE match_id = ?").run(match.match_id);
+    const details = `Disputed
+Player A report: winner=${ra.winner_side}, scoreCode=${ra.score_code}
+Player B report: winner=${rb.winner_side}, scoreCode=${rb.score_code}`;
+    await editMatchMessage(guild, match.match_id, buildMatchAssignmentMessage(match, settings, 'Disputed', details));
+    await sendDisputeNotification(guild, settings, `⚠️ Match ${match.match_id} is disputed. Please review in <#${match.match_channel_id}>.`);
+    return;
+  }
+
+  const winnerSide = ra.winner_side;
+  const score = scoreFromCode(settings.match_format, Number(ra.score_code));
+  if (!score) return;
+
+  let scoreA; let scoreB; let winnerId;
+  if (winnerSide === 'A') {
+    [scoreA, scoreB] = score;
+    winnerId = match.player_a_discord_id;
+  } else {
+    [scoreB, scoreA] = score;
+    winnerId = match.player_b_discord_id;
+  }
+
+  db.prepare('DELETE FROM results WHERE match_id = ?').run(match.match_id);
+  db.prepare(`
+    INSERT INTO results (match_id, winner_discord_id, score_a, score_b, is_forfeit, reporter_discord_id, confirmer_discord_id, confirmed_at)
+    VALUES (?, ?, ?, ?, 0, ?, ?, datetime('now'))
+  `).run(match.match_id, winnerId, scoreA, scoreB, ra.reporter_discord_id, rb.reporter_discord_id);
+
+  db.prepare("UPDATE matches SET state = 'confirmed', ended_at = datetime('now') WHERE match_id = ?").run(match.match_id);
+  db.prepare("UPDATE fixtures SET status = 'confirmed', confirmed_at = datetime('now') WHERE fixture_id = ?").run(match.fixture_id);
+  await editMatchMessage(guild, match.match_id, buildMatchAssignmentMessage(match, settings, 'Confirmed', `Final: ${scoreA}-${scoreB} (Confirmed)`));
+
+  const ch = await guild.channels.fetch(match.match_channel_id).catch(() => null);
+  if (ch && ch.isTextBased()) {
+    const msg = await ch.messages.fetch(match.match_message_id).catch(() => null);
+    if (msg) await msg.react('🔁').catch(() => null);
+  }
+}
+
+async function handleRematchReactionAdd(match, userId, guild, settings) {
+  if (![match.player_a_discord_id, match.player_b_discord_id].includes(userId)) return;
+
+  db.prepare('INSERT OR IGNORE INTO rematch_votes (match_id, discord_user_id) VALUES (?, ?)').run(match.match_id, userId);
+
+  const votes = db.prepare('SELECT discord_user_id FROM rematch_votes WHERE match_id = ?').all(match.match_id).map((r) => r.discord_user_id);
+  const bothReady = votes.includes(match.player_a_discord_id) && votes.includes(match.player_b_discord_id);
+  if (!bothReady) return;
+
+  const nextFixture = db.prepare(`
+    SELECT fixture_id, player_a_discord_id, player_b_discord_id
+    FROM fixtures
+    WHERE league_id = 1
+      AND status = 'unplayed'
+      AND ((player_a_discord_id = ? AND player_b_discord_id = ?) OR (player_a_discord_id = ? AND player_b_discord_id = ?))
+    ORDER BY leg_number ASC, fixture_id ASC
+    LIMIT 1
+  `).get(match.player_a_discord_id, match.player_b_discord_id, match.player_b_discord_id, match.player_a_discord_id);
+
+  if (!nextFixture) return;
+
+  const channel = await guild.channels.fetch(match.match_channel_id || settings.results_channel_id).catch(() => null);
+  if (!channel || !channel.isTextBased()) return;
+
+  await createPendingMatch(nextFixture, channel, guild.id);
+  db.prepare('DELETE FROM rematch_votes WHERE match_id = ?').run(match.match_id);
+
+  await channel.send({
+    content: `🔁 Rematch accepted for Match ${match.match_id}. New match posted for <@${match.player_a_discord_id}> and <@${match.player_b_discord_id}>.`,
+    allowed_mentions: { users: [match.player_a_discord_id, match.player_b_discord_id], roles: [], replied_user: false },
+  }).catch(() => null);
+}
+
+function handleRematchReactionRemove(match, userId) {
+  db.prepare('DELETE FROM rematch_votes WHERE match_id = ? AND discord_user_id = ?').run(match.match_id, userId);
+}
+
+async function handleReactionResultFlow(reaction, user) {
+  if (user.bot) return;
+  if (reaction.partial) await reaction.fetch().catch(() => null);
+  const msg = reaction.message;
+  if (!msg?.guildId) return;
+
+  const match = getMatchByMessage(msg.guildId, msg.channelId, msg.id);
+  if (!match) return;
+
+  const guild = msg.guild;
+  const emoji = reaction.emoji.name;
+  const settings = getGuildSettings(msg.guildId);
+  const validScores = getScoreReactionsForFormat(settings.match_format);
+
+  const isPlayer = [match.player_a_discord_id, match.player_b_discord_id].includes(user.id);
+  const member = await guild.members.fetch(user.id).catch(() => null);
+  const isAdminActor = member ? isAdminMember(member, msg.guildId) : false;
+
+  if (!isPlayer && !isAdminActor) {
+    await reaction.users.remove(user.id).catch(() => null);
+    return;
+  }
+
+  if (match.state === 'cancelled') {
+    await reaction.users.remove(user.id).catch(() => null);
+    return;
+  }
+
+  if (emoji === '🔁') {
+    if (match.state !== 'confirmed') {
+      await reaction.users.remove(user.id).catch(() => null);
+      return;
+    }
+    await handleRematchReactionAdd(match, user.id, guild, settings);
+    return;
+  }
+
+  if (isAdminActor && emoji === '❗') {
+    const accepted = setAdminOverride(match.match_id, user.id, null, null, true, false);
+    if (!accepted) {
+      await reaction.users.remove(user.id).catch(() => null);
+      return;
+    }
+    await reconcileFromPlayerReports(match, settings, guild);
+    return;
+  }
+
+  const override = getAdminOverride(match.match_id);
+  const hasAdminOverride = !!(override && override.active);
+  if (match.state === 'confirmed' && !hasAdminOverride) {
+    await reaction.users.remove(user.id).catch(() => null);
+    return;
+  }
+
+  if (emoji === '🇦' || emoji === '🇧') {
+    if (isAdminActor) {
+      const canUseAdminOverride = !!(override && override.admin_discord_id === user.id && override.active);
+      if (canUseAdminOverride) {
+        const winnerSide = emoji === '🇦' ? 'A' : 'B';
+        setAdminOverride(match.match_id, user.id, winnerSide, override.score_code, true, true);
+        for (const e of validScores) await msg.react(e).catch(() => null);
+        await reconcileFromPlayerReports(match, settings, guild);
+        return;
+      }
+
+      if (!isPlayer) {
+        await reaction.users.remove(user.id).catch(() => null);
+        return;
+      }
+    }
+
+    const winnerSide = emoji === '🇦' ? 'A' : 'B';
+    upsertMatchReport(match.match_id, user.id, { winner_side: winnerSide });
+
+    for (const e of validScores) await msg.react(e).catch(() => null);
+    await reconcileFromPlayerReports(match, settings, guild);
+    return;
+  }
+
+  if (!validScores.includes(emoji)) return;
+
+  const code = validScores.indexOf(emoji);
+  if (isAdminActor) {
+    const canUseAdminOverride = !!(override && override.admin_discord_id === user.id && override.active);
+    if (canUseAdminOverride) {
+      setAdminOverride(match.match_id, user.id, override.winner_side, code, true, Boolean(override.winner_selected));
+      await reconcileFromPlayerReports(match, settings, guild);
+      return;
+    }
+
+    if (!isPlayer) {
+      await reaction.users.remove(user.id).catch(() => null);
+      return;
+    }
+  }
+
+  upsertMatchReport(match.match_id, user.id, { score_code: code });
+  await reconcileFromPlayerReports(match, settings, guild);
+}
+
+async function handleReactionResultFlowRemove(reaction, user) {
+  if (user.bot) return;
+  if (reaction.partial) await reaction.fetch().catch(() => null);
+  const msg = reaction.message;
+  if (!msg?.guildId) return;
+
+  const match = getMatchByMessage(msg.guildId, msg.channelId, msg.id);
+  if (!match) return;
+
+  const guild = msg.guild;
+  const emoji = reaction.emoji.name;
+  const settings = getGuildSettings(msg.guildId);
+
+  if (emoji === '🔁') {
+    handleRematchReactionRemove(match, user.id);
+    return;
+  }
+
+  const member = await guild.members.fetch(user.id).catch(() => null);
+  const isAdminActor = member ? isAdminMember(member, msg.guildId) : false;
+  if (!isAdminActor) return;
+  const scoreReactions = getScoreReactionsForFormat(settings.match_format);
+  if (emoji !== '🇦' && emoji !== '🇧' && emoji !== '❗' && !scoreReactions.includes(emoji)) return;
+
+  const override = getAdminOverride(match.match_id);
+  if (!override) return;
+  if (override.admin_discord_id !== user.id) return;
+  if (emoji === '❗') {
+    clearAdminOverride(match.match_id);
+    logAudit('admin_reaction_override_removed', user.id, { matchId: match.match_id, type: 'exclamation' });
+    await reconcileFromPlayerReports(match, settings, guild);
+    return;
+  }
+
+  if (emoji === '🇦' && override.winner_side !== 'A') return;
+  if (emoji === '🇧' && override.winner_side !== 'B') return;
+  if (scoreReactions.includes(emoji) && Number(override.score_code) !== scoreReactions.indexOf(emoji)) return;
+
+  clearAdminOverride(match.match_id);
+  logAudit('admin_reaction_override_removed', user.id, { matchId: match.match_id });
+  await reconcileFromPlayerReports(match, settings, guild);
+}
+
+client.on(Events.MessageReactionAdd, async (reaction, user) => {
+  try {
+    const handledTable = await maybeHandleTablePaginationReaction(reaction, user, false);
+    if (handledTable) return;
+    const handledReset = await handleResetConfirmationReaction(reaction, user);
+    if (handledReset) return;
+    await handleReactionResultFlow(reaction, user);
+  } catch (err) {
+    console.error('Reaction flow error:', err);
+  }
+});
+
+client.on(Events.MessageReactionRemove, async (reaction, user) => {
+  try {
+    const handledTable = await maybeHandleTablePaginationReaction(reaction, user, true);
+    if (handledTable) return;
+    await handleReactionResultFlowRemove(reaction, user);
+  } catch (err) {
+    console.error('Reaction remove flow error:', err);
+  }
+});
+
+let matchmakerTimer = null;
+
+async function runMatchmakingTick() {
+  for (const guild of client.guilds.cache.values()) {
+    await tryMatchmake(guild).catch((err) => {
+      console.error('Background matchmaking tick error:', err);
+    });
+  }
+}
+
+function invokeMatchmakingTickSafely() {
+  if (typeof runMatchmakingTick !== 'function') {
+    console.error('Matchmaking tick skipped: runMatchmakingTick is not defined');
+    return;
+  }
+  runMatchmakingTick().catch((err) => {
+    console.error('Background matchmaking tick failed:', err);
+  });
+}
+
+client.once(Events.ClientReady, () => {
+  console.log(`Logged in as ${client.user.tag}`);
+
+  if (!Number.isFinite(MATCHMAKER_INTERVAL_MS) || MATCHMAKER_INTERVAL_MS < 5000) {
+    console.warn(`Invalid MATCHMAKER_INTERVAL_MS=${MATCHMAKER_INTERVAL_MS}; defaulting to 30000ms.`);
+  }
+
+  const interval = Number.isFinite(MATCHMAKER_INTERVAL_MS) && MATCHMAKER_INTERVAL_MS >= 5000
+    ? MATCHMAKER_INTERVAL_MS
+    : 30000;
+
+  matchmakerTimer = setInterval(() => {
+    invokeMatchmakingTickSafely();
+  }, interval);
+
+  // Kick one immediate pass on startup.
+  invokeMatchmakingTickSafely();
+});
+
+client.on(Events.InteractionCreate, async (interaction) => {
+  try {
+    // Keep last seen name updated if signed up
+    const displayName = getDisplayNameFromInteraction(interaction);
+    const existing = getPlayer(interaction.user.id);
+    if (existing) upsertLastSeenDisplayName(interaction.user.id, displayName);
+
+    if (interaction.isChatInputCommand()) {
+      const name = interaction.commandName;
+
+      if (name === 'ping') {
+        await interaction.reply({ content: 'pong' });
+        return;
+      }
+
+      if (name === 'signup') {
+        const modal = new ModalBuilder()
+          .setCustomId('signup_modal')
+          .setTitle('Tekken League Signup');
+
+        const realName = new TextInputBuilder()
+          .setCustomId('real_name')
+          .setLabel('Real name')
+          .setStyle(TextInputStyle.Short)
+          .setRequired(true)
+          .setMaxLength(80);
+
+        const tekkenTag = new TextInputBuilder()
+          .setCustomId('tekken_tag')
+          .setLabel('Tekken tag / IGN')
+          .setStyle(TextInputStyle.Short)
+          .setRequired(true)
+          .setMaxLength(40);
+
+        const email = new TextInputBuilder()
+          .setCustomId('email')
+          .setLabel('Email')
+          .setStyle(TextInputStyle.Short)
+          .setRequired(true)
+          .setMaxLength(120);
+
+        const phone = new TextInputBuilder()
+          .setCustomId('phone')
+          .setLabel('Phone number')
+          .setStyle(TextInputStyle.Short)
+          .setRequired(true)
+          .setMaxLength(40);
+
+        modal.addComponents(
+          new ActionRowBuilder().addComponents(realName),
+          new ActionRowBuilder().addComponents(tekkenTag),
+          new ActionRowBuilder().addComponents(email),
+          new ActionRowBuilder().addComponents(phone),
+        );
+
         await interaction.showModal(modal);
         return;
       }
@@ -1667,13 +2080,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const p = ensureSignedUp(interaction);
         if (!p) {
           await interaction.reply({ content: 'You are not signed up yet. Use /signup first.' });
-          return;
-        }
-
-        const playerA = interaction.options.getUser('player_a', true);
-        const playerB = interaction.options.getUser('player_b', true);
-        if (playerA.id === playerB.id) {
-          await interaction.reply({ content: 'Select two different players.', ephemeral: true });
           return;
         }
 
@@ -1894,19 +2300,6 @@ ${lines.join('\n')}`, ephemeral: false });
           await interaction.reply({ content: 'Admin only.', ephemeral: true });
           return;
         }
-
-        const rules = normalizePointRules({
-          points_win: interaction.options.getInteger('win', true),
-          points_loss: interaction.options.getInteger('loss', true),
-          points_no_show: interaction.options.getInteger('no_show', true),
-          points_sweep_bonus: interaction.options.getInteger('sweep_bonus', true),
-        });
-
-        db.prepare(`
-          UPDATE leagues
-          SET points_win = ?, points_loss = ?, points_no_show = ?, points_sweep_bonus = ?
-          WHERE league_id = 1
-        `).run(rules.points_win, rules.points_loss, rules.points_no_show, rules.points_sweep_bonus);
 
         logAudit('checkin', interaction.user.id, { date: today });
         await sendActivityNotification(interaction.guild, getGuildSettings(interaction.guildId), `✅ Check-in: <@${interaction.user.id}> on ${today}.`).catch(() => null);
@@ -2238,7 +2631,7 @@ ${lines.join('\n')}`, ephemeral: false });
         return;
       }
 
-      if (name === 'admin_reset') {
+      if (name === 'admin_generate_fixtures') {
         if (!isAdmin(interaction)) {
           await interaction.reply({ content: 'Admin only.', ephemeral: true });
           return;

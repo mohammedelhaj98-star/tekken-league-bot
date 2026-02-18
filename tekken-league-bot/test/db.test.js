@@ -63,6 +63,7 @@ test('initDb adds configurable points columns and admin override control columns
   assert.equal(leagueCols.includes('points_loss'), true);
   assert.equal(leagueCols.includes('points_no_show'), true);
   assert.equal(leagueCols.includes('points_sweep_bonus'), true);
+  assert.equal(leagueCols.includes('tournament_start_date'), true);
 
   const overrideCols = db.prepare("PRAGMA table_info(admin_match_overrides)").all().map((c) => c.name);
   assert.equal(overrideCols.includes('score_code'), true);

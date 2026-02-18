@@ -105,9 +105,12 @@ Signup/check-in/ready activity notifications can be routed via `/bot_settings se
 - `/points` lets admins set points values for: win, loss, no-show/forfeit win, and extra 3-0 sweep bonus.
 - SHOW% in table/settings is attendance-based: starts at 100% and drops as missed days increase across the configured tournament days.
 - Players have an allowance of up to 5 missed check-ins; players who finish all required fixtures early are exempt from further check-ins.
+- Attendance/show% now uses tournament start date through today (elapsed days), not full season length from day one.
 - The table now includes a legend describing each header before the table output.
 - The table now includes `GP` (games played).
+- `ALLOW` now shows a plain number of missed-checkin days left (e.g. `5`), and `EXEMPT (5)` for finished players.
 - `/table` supports pagination: react with ◀️ / ▶️ on the table message to scroll all pages.
+- Match messages are pre-seeded with winner, score, and override reactions so users/admins can click immediately.
 
 
 ## Automatic queue matching
