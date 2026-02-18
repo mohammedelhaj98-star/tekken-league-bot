@@ -70,6 +70,12 @@ Admins (requires Administrator permission in the server):
 
 
 ## Testing
+Run a fast syntax validation (recommended before deploy/restart):
+
+```bash
+npm run check:syntax
+```
+
 Run unit tests with:
 
 ```bash
