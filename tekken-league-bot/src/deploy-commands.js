@@ -28,6 +28,11 @@ const commands = [
     .setDescription('Alias for /helpplayer'),
 
   new SlashCommandBuilder()
+    .setName('adminhelp')
+    .setDescription('Admin: show what each admin command does')
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
+  new SlashCommandBuilder()
     .setName('signup')
     .setDescription('Register for the league (Real name, Tekken tag, email, phone)'),
 
@@ -194,6 +199,22 @@ const commands = [
       .setName('minimum_showup_percent')
       .setDescription('Minimum show-up percentage required (0-100)')
       .setRequired(false))
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
+  new SlashCommandBuilder()
+    .setName('points')
+    .setDescription('Admin: configure league points values')
+    .addIntegerOption(o => o.setName('win').setDescription('Points for a normal win').setRequired(true).setMinValue(0).setMaxValue(20))
+    .addIntegerOption(o => o.setName('loss').setDescription('Points for a played loss').setRequired(true).setMinValue(0).setMaxValue(20))
+    .addIntegerOption(o => o.setName('no_show').setDescription('Points for no-show/forfeit win').setRequired(true).setMinValue(0).setMaxValue(20))
+    .addIntegerOption(o => o.setName('sweep_bonus').setDescription('Extra points for 3-0 sweep').setRequired(true).setMinValue(0).setMaxValue(20))
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
+  new SlashCommandBuilder()
+    .setName('admin_vs')
+    .setDescription('Admin: create a specific match-up if an unplayed fixture exists')
+    .addUserOption(o => o.setName('player_a').setDescription('First player').setRequired(true))
+    .addUserOption(o => o.setName('player_b').setDescription('Second player').setRequired(true))
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 
   new SlashCommandBuilder()

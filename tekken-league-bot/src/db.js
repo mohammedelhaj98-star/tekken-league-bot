@@ -23,6 +23,10 @@ function initDb(db) {
       season_days INTEGER NOT NULL DEFAULT 20,
       attendance_min_days INTEGER NOT NULL DEFAULT 15,
       eligibility_min_percent REAL NOT NULL DEFAULT 0.75,
+      points_win INTEGER NOT NULL DEFAULT 2,
+      points_loss INTEGER NOT NULL DEFAULT 1,
+      points_no_show INTEGER NOT NULL DEFAULT 3,
+      points_sweep_bonus INTEGER NOT NULL DEFAULT 1,
       max_players INTEGER NOT NULL DEFAULT 64,
       timeslot_count INTEGER NOT NULL DEFAULT 4,
       timeslot_duration_minutes INTEGER NOT NULL DEFAULT 120,
@@ -133,7 +137,10 @@ function initDb(db) {
     CREATE TABLE IF NOT EXISTS admin_match_overrides (
       match_id INTEGER PRIMARY KEY,
       admin_discord_id TEXT NOT NULL,
-      winner_side TEXT NOT NULL CHECK (winner_side IN ('A','B')),
+      winner_side TEXT CHECK (winner_side IN ('A','B')),
+      score_code INTEGER,
+      active INTEGER NOT NULL DEFAULT 1,
+      winner_selected INTEGER NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       updated_at TEXT NOT NULL DEFAULT (datetime('now')),
       FOREIGN KEY (match_id) REFERENCES matches(match_id)
@@ -190,6 +197,10 @@ function initDb(db) {
   }
 
   ensureColumn('leagues', 'max_players', 'max_players INTEGER NOT NULL DEFAULT 64');
+  ensureColumn('leagues', 'points_win', 'points_win INTEGER NOT NULL DEFAULT 2');
+  ensureColumn('leagues', 'points_loss', 'points_loss INTEGER NOT NULL DEFAULT 1');
+  ensureColumn('leagues', 'points_no_show', 'points_no_show INTEGER NOT NULL DEFAULT 3');
+  ensureColumn('leagues', 'points_sweep_bonus', 'points_sweep_bonus INTEGER NOT NULL DEFAULT 1');
   ensureColumn('leagues', 'timeslot_count', 'timeslot_count INTEGER NOT NULL DEFAULT 4');
   ensureColumn('leagues', 'timeslot_duration_minutes', 'timeslot_duration_minutes INTEGER NOT NULL DEFAULT 120');
   ensureColumn('leagues', 'timeslot_starts', "timeslot_starts TEXT NOT NULL DEFAULT '18:00,20:00,22:00,00:00'");
@@ -197,6 +208,9 @@ function initDb(db) {
   ensureColumn('matches', 'match_channel_id', 'match_channel_id TEXT');
   ensureColumn('matches', 'match_message_id', 'match_message_id TEXT');
   ensureColumn('admin_roles', 'guild_id', 'guild_id TEXT');
+  ensureColumn('admin_match_overrides', 'score_code', 'score_code INTEGER');
+  ensureColumn('admin_match_overrides', 'active', 'active INTEGER NOT NULL DEFAULT 1');
+  ensureColumn('admin_match_overrides', 'winner_selected', 'winner_selected INTEGER NOT NULL DEFAULT 0');
   ensureColumn('guild_settings', 'dispute_channel_id', 'dispute_channel_id TEXT');
   ensureColumn('guild_settings', 'activity_channel_id', 'activity_channel_id TEXT');
 

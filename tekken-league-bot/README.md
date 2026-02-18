@@ -48,6 +48,7 @@ Players:
 - /help
 - /helpplayer
 - /playerhelp
+- /adminhelp
 
 Admins (requires Administrator permission in the server):
 - /bot_settings
@@ -58,11 +59,13 @@ Admins (requires Administrator permission in the server):
 - /admin_tournament_settings
 - /admin_setup_tournament
 - /admin_generate_fixtures
-- /admin_reset (levels: checkins | league | everything)
+- /admin_reset (levels: checkins | league | everything, DM reaction confirm)
 - /admin_reset_league (legacy alias for league-level reset)
  - /admin_force_result
  - /admin_void_match
  - /admin_dispute_match
+ - /points
+ - /admin_vs
 
 
 ## Testing
@@ -93,9 +96,17 @@ Signup/check-in/ready activity notifications can be routed via `/bot_settings se
 ## Fixture history and notifications
 - You can run `/admin_generate_fixtures` repeatedly; it only adds missing pair/leg fixtures and keeps full history.
 - Confirmed matches are immutable for players and only changeable by admins via admin commands.
-- Admins can override match outcomes directly from the match message by reacting 🇦/🇧. If that admin reaction is removed, player report consensus is restored.
+- Admin override now uses ❗ as an explicit gate: admin reacts ❗ first, then submits 🇦/🇧 winner and score emoji to force the final result. This supports non-3-0 scores and keeps normal player-report flow intact.
 - When a match is created, it is posted publicly in the results channel and each player also receives a DM reminder with the fixture details.
 - After a confirmed match, both players can react 🔁 to immediately start their second-leg rematch if available (no re-queue needed).
+- `/admin_vs` lets admins set a specific match regardless of queue, but only when an eligible unplayed fixture exists between those two players.
+
+## Points and show% behavior
+- `/points` lets admins set points values for: win, loss, no-show/forfeit win, and extra 3-0 sweep bonus.
+- SHOW% in table/settings is attendance-based: starts at 100% and drops as missed days increase across the configured tournament days.
+- Players have an allowance of up to 5 missed check-ins; players who finish all required fixtures early are exempt from further check-ins.
+- The table now includes a legend describing each header before the table output.
+- The table now includes `GP` (games played).
 
 
 ## Automatic queue matching
@@ -104,4 +115,4 @@ Signup/check-in/ready activity notifications can be routed via `/bot_settings se
 - Missing fixtures are auto-generated during matchmaking without duplicating historical pair/leg records.
 
 
-Each reset sends DM notifications to the requesting admin and all other admins, including who requested it and what level is being executed.
+Each reset sends DM notifications to the requesting admin and all other admins, including who requested it and what level is being executed. Resets execute only after requester DM reaction confirmation (✅).

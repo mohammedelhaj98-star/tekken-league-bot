@@ -45,6 +45,36 @@ test('calcMatchPoints applies clean win and loser bonus correctly', () => {
   }), { pointsA: 2, pointsB: 1 });
 });
 
+test('calcMatchPoints uses custom point rules when provided', () => {
+  assert.deepEqual(calcMatchPoints({
+    score_a: 3,
+    score_b: 0,
+    winner_discord_id: 'u1',
+    player_a_discord_id: 'u1',
+    player_b_discord_id: 'u2',
+    is_forfeit: 0,
+  }, {
+    points_win: 5,
+    points_loss: 2,
+    points_no_show: 7,
+    points_sweep_bonus: 3,
+  }), { pointsA: 8, pointsB: 2 });
+
+  assert.deepEqual(calcMatchPoints({
+    score_a: 0,
+    score_b: 0,
+    winner_discord_id: 'u2',
+    player_a_discord_id: 'u1',
+    player_b_discord_id: 'u2',
+    is_forfeit: 1,
+  }, {
+    points_win: 5,
+    points_loss: 2,
+    points_no_show: 7,
+    points_sweep_bonus: 3,
+  }), { pointsA: 0, pointsB: 7 });
+});
+
 test('computeStandings ranks by points then diff then games won', () => {
   const db = setupDb();
 
