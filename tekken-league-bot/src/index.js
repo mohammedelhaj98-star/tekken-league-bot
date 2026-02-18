@@ -1656,11 +1656,16 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
         await interaction.reply({
           content: [
-            `Real name: ${realName}`,
-            `Tekken tag: ${p.tekken_tag}`,
-            `Email: ${maskEmail(email)}`,
-            `Phone: ${maskPhone(phone)}`,
-            `Discord: ${p.discord_display_name_last_seen || p.discord_display_name_at_signup || interaction.user.username}`,
+            '**League Bot Quick Help**',
+            '• /signup — register or update your league profile',
+            "• /checkin — mark today's availability (attendance requirement)",
+            '• /ready and /unready — join/leave live matchmaking queue',
+            '• /queue — view current ready players',
+            '• /left — see who you still need to play and remaining matches',
+            '• /standings or /table — view live standings table anytime',
+            '• /matches — view recent match IDs and statuses',
+            '• /mydata — view your private stored profile details',
+            'Admins: /adminhelp, /points, /admin_vs, /bot_settings, /admin_status, /admin_player_matches, /admin_player_left, /admin_tournament_settings, /admin_setup_tournament, /admin_generate_fixtures, /admin_force_result, /admin_void_match, /admin_dispute_match, /admin_reset (DM confirm), /admin_reset_league',
           ].join('\n'),
         });
         return;
@@ -1673,11 +1678,12 @@ client.on(Events.InteractionCreate, async (interaction) => {
           return;
         }
 
-        const today = getTodayISO(true);
-        db.prepare(`
-          INSERT OR REPLACE INTO attendance (league_id, discord_user_id, date, checked_in)
-          VALUES (1, ?, ?, 1)
-        `).run(interaction.user.id, today);
+        const rules = normalizePointRules({
+          points_win: interaction.options.getInteger('win', true),
+          points_loss: interaction.options.getInteger('loss', true),
+          points_no_show: interaction.options.getInteger('no_show', true),
+          points_sweep_bonus: interaction.options.getInteger('sweep_bonus', true),
+        });
 
         logAudit('checkin', interaction.user.id, { date: today });
         await sendActivityNotification(interaction.guild, getGuildSettings(interaction.guildId), `✅ Check-in: <@${interaction.user.id}> on ${today}.`).catch(() => null);
