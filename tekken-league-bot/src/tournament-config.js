@@ -21,6 +21,28 @@ function parseTimeSlotStarts(raw) {
   return { ok: true, times: normalized };
 }
 
+function parseTournamentStartDate(raw) {
+  const text = String(raw || '').trim();
+  if (!text) return { ok: false, error: 'Tournament start date cannot be empty.' };
+  const m = text.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m) return { ok: false, error: 'Tournament start date must be in YYYY-MM-DD format.' };
+
+  const year = Number(m[1]);
+  const month = Number(m[2]);
+  const day = Number(m[3]);
+  const dt = new Date(Date.UTC(year, month - 1, day));
+  if (
+    Number.isNaN(dt.getTime())
+    || dt.getUTCFullYear() !== year
+    || dt.getUTCMonth() !== month - 1
+    || dt.getUTCDate() !== day
+  ) {
+    return { ok: false, error: 'Tournament start date is invalid.' };
+  }
+
+  return { ok: true, value: `${String(year).padStart(4, '0')}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}` };
+}
+
 function validateTournamentSetupInput(input) {
   const out = {};
 
@@ -65,6 +87,16 @@ function validateTournamentSetupInput(input) {
     out.timeslot_starts = parsed.times.join(',');
   }
 
+  if (input.clearTimeslotStarts === true) {
+    out.timeslot_starts = '';
+  }
+
+  if (input.tournamentStartDateRaw !== undefined && input.tournamentStartDateRaw !== null) {
+    const parsedDate = parseTournamentStartDate(input.tournamentStartDateRaw);
+    if (!parsedDate.ok) return parsedDate;
+    out.tournament_start_date = parsedDate.value;
+  }
+
   if (out.timeslot_count && out.timeslot_starts) {
     const startsCount = out.timeslot_starts.split(',').length;
     if (startsCount !== out.timeslot_count) {
@@ -77,5 +109,6 @@ function validateTournamentSetupInput(input) {
 
 module.exports = {
   parseTimeSlotStarts,
+  parseTournamentStartDate,
   validateTournamentSetupInput,
 };

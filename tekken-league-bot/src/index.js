@@ -2115,12 +2115,22 @@ ${lines.join('\n')}`, ephemeral: false });
         const timeslotCount = interaction.options.getInteger('timeslot_count');
         const timeslotDurationMinutes = interaction.options.getInteger('timeslot_duration_minutes');
         const timeSlotStartsRaw = interaction.options.getString('timeslot_starts');
+        const clearTimeslotStarts = interaction.options.getBoolean('clear_timeslot_starts') === true;
         const totalTournamentDays = interaction.options.getInteger('total_tournament_days');
         const minimumShowupPercent = interaction.options.getNumber('minimum_showup_percent');
+        const tournamentStartDateRaw = interaction.options.getString('tournament_start_date');
 
-        const hasAnyUpdate = [maxPlayers, timeslotCount, timeslotDurationMinutes, timeSlotStartsRaw, totalTournamentDays, minimumShowupPercent]
+        if (clearTimeslotStarts && timeSlotStartsRaw) {
+          await interaction.reply({
+            content: 'Use either `timeslot_starts` or `clear_timeslot_starts:true`, not both at the same time.',
+            ephemeral: true,
+          });
+          return;
+        }
+
+        const hasAnyUpdate = [maxPlayers, timeslotCount, timeslotDurationMinutes, timeSlotStartsRaw, totalTournamentDays, minimumShowupPercent, tournamentStartDateRaw]
           .some(v => v !== null && v !== undefined);
-        if (!hasAnyUpdate) {
+        if (!hasAnyUpdate && !clearTimeslotStarts) {
           await interaction.reply({
             content: `No values supplied.
 ${buildTournamentSettingsMessage()}`,
@@ -2134,8 +2144,10 @@ ${buildTournamentSettingsMessage()}`,
           timeslotCount,
           timeslotDurationMinutes,
           timeSlotStartsRaw,
+          clearTimeslotStarts,
           totalTournamentDays,
           minimumShowupPercent,
+          tournamentStartDateRaw,
         });
 
         if (!validated.ok) {
@@ -2151,15 +2163,19 @@ ${buildTournamentSettingsMessage()}`,
           timeslot_starts: validated.values.timeslot_starts ?? current.timeslot_starts,
           season_days: validated.values.season_days ?? current.season_days,
           eligibility_min_percent: validated.values.eligibility_min_percent ?? current.eligibility_min_percent,
+          tournament_start_date: validated.values.tournament_start_date ?? current.tournament_start_date,
         };
 
-        if (merged.timeslot_starts.split(',').length !== merged.timeslot_count) {
+        const timeslotStartsList = String(merged.timeslot_starts || '').split(',').map((x) => x.trim()).filter(Boolean);
+        if (timeslotStartsList.length !== merged.timeslot_count) {
           await interaction.reply({
-            content: `No. of timeslots (${merged.timeslot_count}) must match start times count (${merged.timeslot_starts.split(',').length}).`,
+            content: `No. of timeslots (${merged.timeslot_count}) must match start times count (${timeslotStartsList.length}).`,
             ephemeral: true,
           });
           return;
         }
+
+        merged.timeslot_starts = timeslotStartsList.join(',');
 
         const minAttendanceDays = Math.ceil(merged.season_days * merged.eligibility_min_percent);
 
@@ -2172,7 +2188,8 @@ ${buildTournamentSettingsMessage()}`,
             timeslot_starts = ?,
             season_days = ?,
             eligibility_min_percent = ?,
-            attendance_min_days = ?
+            attendance_min_days = ?,
+            tournament_start_date = ?
           WHERE league_id = 1
         `).run(
           merged.max_players,
@@ -2182,6 +2199,7 @@ ${buildTournamentSettingsMessage()}`,
           merged.season_days,
           merged.eligibility_min_percent,
           minAttendanceDays,
+          merged.tournament_start_date,
         );
 
         logAudit('admin_setup_tournament', interaction.user.id, {

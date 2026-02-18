@@ -81,8 +81,10 @@ Use `/admin_setup_tournament` to configure the league before generating fixtures
 - number of timeslots
 - duration of each timeslot
 - start times of each timeslot (comma-separated HH:MM, 24h)
+- clear previously configured timeslot starts (`clear_timeslot_starts:true`)
 - total tournament days
 - minimum show-up %
+- tournament start date (`YYYY-MM-DD`)
 
 Use `/admin_tournament_settings` any time to review the current configuration.
 

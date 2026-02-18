@@ -196,6 +196,10 @@ const commands = [
       .setName('timeslot_starts')
       .setDescription('Comma-separated start times in 24h format, e.g. 18:00,20:00')
       .setRequired(false))
+    .addBooleanOption(o => o
+      .setName('clear_timeslot_starts')
+      .setDescription('Clear previously set timeslot starts')
+      .setRequired(false))
     .addIntegerOption(o => o
       .setName('total_tournament_days')
       .setDescription('Total tournament days (1-365)')
@@ -203,6 +207,10 @@ const commands = [
     .addNumberOption(o => o
       .setName('minimum_showup_percent')
       .setDescription('Minimum show-up percentage required (0-100)')
+      .setRequired(false))
+    .addStringOption(o => o
+      .setName('tournament_start_date')
+      .setDescription('Tournament start date in YYYY-MM-DD')
       .setRequired(false))
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 
