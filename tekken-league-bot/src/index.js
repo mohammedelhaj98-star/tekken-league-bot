@@ -1348,6 +1348,16 @@ function invokeMatchmakingTickSafely() {
   });
 }
 
+function invokeMatchmakingTickSafely() {
+  if (typeof runMatchmakingTick !== 'function') {
+    console.error('Matchmaking tick skipped: runMatchmakingTick is not defined');
+    return;
+  }
+  runMatchmakingTick().catch((err) => {
+    console.error('Background matchmaking tick failed:', err);
+  });
+}
+
 client.once(Events.ClientReady, () => {
   console.log(`Logged in as ${client.user.tag}`);
 
@@ -1367,7 +1377,7 @@ client.once(Events.ClientReady, () => {
   invokeMatchmakingTickSafely();
 });
 
-client.on(Events.InteractionCreate, async (interaction) => {
+async function handleInteractionCreate(interaction) {
   try {
     const isTableCommand = interaction.isChatInputCommand() && interaction.commandName === 'table';
     // Acknowledge /table ASAP to avoid Discord's 3-second interaction timeout.
@@ -1380,8 +1390,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
     const existing = getPlayer(interaction.user.id);
     if (existing) upsertLastSeenDisplayName(interaction.user.id, displayName);
 
-    if (interaction.isChatInputCommand()) {
-      const name = interaction.commandName;
+function upsertMatchReport(matchId, userId, patch) {
+  const existing = db.prepare('SELECT * FROM match_reports WHERE match_id = ? AND reporter_discord_id = ?').get(matchId, userId);
+  const winnerSide = patch.winner_side !== undefined ? patch.winner_side : (existing?.winner_side || null);
+  const scoreCode = patch.score_code !== undefined ? patch.score_code : (existing?.score_code ?? null);
 
       if (name === 'ping') {
         await interaction.reply({ content: 'pong' });
@@ -1750,6 +1762,8 @@ ${lines.join('\n')}`, ephemeral: false });
           });
           return;
         }
+        return;
+      }
 
         const fixture = getNextUnplayedFixtureBetween(playerA.id, playerB.id);
         if (!fixture) {
@@ -2188,11 +2202,39 @@ ${buildTournamentSettingsMessage()}`,
         }
 
         const matchId = interaction.options.getInteger('match_id', true);
+        const reason = (interaction.options.getString('reason') || 'Manual admin dispute').trim();
         const match = db.prepare('SELECT * FROM matches WHERE match_id = ?').get(matchId);
         if (!match) {
           await interaction.reply({ content: 'Match not found.', ephemeral: true });
           return;
         }
+
+        db.prepare("UPDATE matches SET state = 'disputed' WHERE match_id = ?").run(matchId);
+        logAudit('admin_dispute_match', interaction.user.id, { matchId, reason });
+
+        const gs = getGuildSettings(interaction.guildId);
+        await sendDisputeNotification(
+          interaction.guild,
+          gs,
+          `⚠️ Admin marked match ${matchId} as disputed. Reason: ${reason}. Review channel: <#${match.match_channel_id || gs.results_channel_id || ''}>`
+        );
+
+        await interaction.reply({ content: `Match ${matchId} marked as disputed.`, ephemeral: true });
+        return;
+      }
+
+      if (name === 'admin_void_match') {
+        if (!isAdmin(interaction)) {
+          await interaction.reply({ content: 'Admin only.', ephemeral: true });
+          return;
+        }
+
+        const rules = normalizePointRules({
+          points_win: interaction.options.getInteger('win', true),
+          points_loss: interaction.options.getInteger('loss', true),
+          points_no_show: interaction.options.getInteger('no_show', true),
+          points_sweep_bonus: interaction.options.getInteger('sweep_bonus', true),
+        });
 
         // Delete results, reopen fixture, cancel match
         db.prepare('DELETE FROM results WHERE match_id = ?').run(matchId);
@@ -2200,7 +2242,11 @@ ${buildTournamentSettingsMessage()}`,
         db.prepare("UPDATE matches SET state = 'cancelled', ended_at = datetime('now') WHERE match_id = ?").run(matchId);
         logAudit('admin_void_match', interaction.user.id, { matchId });
 
-        await interaction.reply({ content: `Match ${matchId} voided and fixture reopened.`, ephemeral: true });
+        logAudit('admin_points_update', interaction.user.id, rules);
+        await interaction.reply({
+          content: `Points updated: win=${rules.points_win}, loss=${rules.points_loss}, no-show=${rules.points_no_show}, 3-0 sweep bonus=${rules.points_sweep_bonus}.`,
+          ephemeral: true,
+        });
         return;
       }
 
@@ -2232,7 +2278,17 @@ ${buildTournamentSettingsMessage()}`,
           return;
         }
 
-        const displayName = getDisplayNameFromInteraction(interaction);
+        const eligibleOpponentIds = getEligibleOpponentsForPlayer(playerA.id).map((row) => row.opponent_id);
+        if (!eligibleOpponentIds.includes(playerB.id)) {
+          const choices = getEligibleOpponentsForPlayer(playerA.id).map((row) => row.tekken_tag || row.opponent_id);
+          await interaction.reply({
+            content: choices.length
+              ? `That opponent is not eligible for ${pA.tekken_tag}. Eligible opponents: ${choices.join(', ')}`
+              : `${pA.tekken_tag} has no eligible opponents left.`,
+            ephemeral: true,
+          });
+          return;
+        }
 
         const existing = getPlayer(interaction.user.id);
         const isNewSignup = !existing;
@@ -2312,6 +2368,10 @@ ${buildTournamentSettingsMessage()}`,
       // ignore
     }
   }
+}
+
+client.on(Events.InteractionCreate, (interaction) => {
+  void handleInteractionCreate(interaction);
 });
 
 function shutdown(signal) {
