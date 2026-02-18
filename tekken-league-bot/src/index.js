@@ -2360,7 +2360,7 @@ ${buildTournamentSettingsMessage()}`,
   }
 }
 
-client.on(Events.InteractionCreate, (interaction) => {
+client.on(Events.InteractionCreate, async (interaction) => {
   void handleInteractionCreate(interaction);
 });
 
