@@ -133,9 +133,9 @@ function getLeaguePointRules(db, league_id = 1) {
 function computeStandings(db, league_id = 1) {
   // Build base rows
   const players = db.prepare(`
-    SELECT discord_user_id, tekken_tag, discord_display_name_last_seen
+    SELECT discord_user_id, tekken_tag, discord_display_name_last_seen, status
     FROM players
-    WHERE league_id = ? AND status = 'active'
+    WHERE league_id = ? AND status IN ('active', 'disqualified')
   `).all(league_id);
 
   const rows = new Map();
@@ -144,6 +144,7 @@ function computeStandings(db, league_id = 1) {
       discord_user_id: p.discord_user_id,
       name: p.discord_display_name_last_seen || p.tekken_tag,
       tekken_tag: p.tekken_tag,
+      status: p.status || 'active',
       points: 0,
       wins: 0,
       losses: 0,
@@ -154,9 +155,12 @@ function computeStandings(db, league_id = 1) {
 
   const pointRules = getLeaguePointRules(db, league_id);
 
-  // Join confirmed results with match+fixture to get players
+  const dqIds = new Set(players.filter((p) => p.status === 'disqualified').map((p) => p.discord_user_id));
+
+  // Join confirmed results with match+fixture to get players (keyed by fixture)
   const confirmed = db.prepare(`
     SELECT
+      f.fixture_id,
       m.player_a_discord_id,
       m.player_b_discord_id,
       r.winner_discord_id,
@@ -168,11 +172,55 @@ function computeStandings(db, league_id = 1) {
     JOIN fixtures f ON f.fixture_id = m.fixture_id
     WHERE f.league_id = ? AND r.confirmed_at IS NOT NULL
   `).all(league_id);
+  const confirmedByFixture = new Map(confirmed.map((r) => [r.fixture_id, r]));
 
-  for (const r of confirmed) {
-    const A = rows.get(r.player_a_discord_id);
-    const B = rows.get(r.player_b_discord_id);
+  // Iterate every fixture so disqualification can override all matches (retroactive + future).
+  const fixtures = db.prepare(`
+    SELECT fixture_id, player_a_discord_id, player_b_discord_id
+    FROM fixtures
+    WHERE league_id = ?
+  `).all(league_id);
+
+  for (const fixture of fixtures) {
+    const A = rows.get(fixture.player_a_discord_id);
+    const B = rows.get(fixture.player_b_discord_id);
     if (!A || !B) continue;
+
+    const aIsDq = dqIds.has(fixture.player_a_discord_id);
+    const bIsDq = dqIds.has(fixture.player_b_discord_id);
+
+    // If one side is DQ, that side always loses 0-3.
+    if (aIsDq !== bIsDq) {
+      const winnerId = aIsDq ? fixture.player_b_discord_id : fixture.player_a_discord_id;
+      const loserId = aIsDq ? fixture.player_a_discord_id : fixture.player_b_discord_id;
+
+      const winner = rows.get(winnerId);
+      const loser = rows.get(loserId);
+      if (!winner || !loser) continue;
+
+      winner.games_won += 3;
+      winner.games_lost += 0;
+      loser.games_won += 0;
+      loser.games_lost += 3;
+      winner.wins += 1;
+      loser.losses += 1;
+
+      const pts = calcMatchPoints({
+        score_a: winnerId === fixture.player_a_discord_id ? 3 : 0,
+        score_b: winnerId === fixture.player_b_discord_id ? 3 : 0,
+        winner_discord_id: winnerId,
+        player_a_discord_id: fixture.player_a_discord_id,
+        player_b_discord_id: fixture.player_b_discord_id,
+        is_forfeit: 1,
+      }, pointRules);
+
+      A.points += pts.pointsA;
+      B.points += pts.pointsB;
+      continue;
+    }
+
+    const r = confirmedByFixture.get(fixture.fixture_id);
+    if (!r) continue;
 
     A.games_won += r.score_a;
     A.games_lost += r.score_b;

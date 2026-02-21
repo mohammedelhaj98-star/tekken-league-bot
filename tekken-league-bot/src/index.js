@@ -196,7 +196,7 @@ function upsertLastSeenDisplayName(discord_user_id, displayName) {
 
 function getPlayer(discord_user_id) {
   return db.prepare(`
-    SELECT * FROM players WHERE league_id = 1 AND discord_user_id = ?
+    SELECT * FROM players WHERE league_id = 1 AND discord_user_id = ? AND status IN ('active', 'disqualified')
   `).get(discord_user_id);
 }
 
@@ -561,7 +561,7 @@ function buildStandingsListMessage() {
   const standings = computeStandings(db, 1);
   if (!standings.length) return '**Standings**\nNo active players yet. Use /signup to join the league.';
 
-  const lines = standings.map((s, idx) => `${idx + 1}. ${s.tekken_tag}`);
+  const lines = standings.map((s, idx) => `${idx + 1}. ${s.tekken_tag}${s.status === 'disqualified' ? ' (DQ)' : ''}`);
   return `**Standings**\n${lines.join('\n')}`;
 }
 
@@ -616,11 +616,13 @@ function buildStandingsTablePages() {
     const completed = completedByPlayer.get(s.discord_user_id) || 0;
     const finishedMatches = requiredFixturesPerPlayer > 0 && completed >= requiredFixturesPerPlayer;
     const allowanceRemaining = Math.max(0, missedAllowance - missedDays);
-    const allowanceText = finishedMatches ? `EXEMPT (${allowanceRemaining})` : `${allowanceRemaining}`;
+    const allowanceText = s.status === 'disqualified'
+      ? '0'
+      : (finishedMatches ? `EXEMPT (${allowanceRemaining})` : `${allowanceRemaining}`);
 
     return {
       rank: String(idx + 1),
-      player: formatCell(s.tekken_tag, 24),
+      player: formatCell(`${s.tekken_tag}${s.status === 'disqualified' ? ' (DQ)' : ''}`, 24),
       pts: String(s.points),
       gp: String(s.played),
       w: String(s.wins),
@@ -786,6 +788,7 @@ function getEligibleOpponentsForPlayer(discordUserId) {
       AND p.discord_user_id = CASE WHEN f.player_a_discord_id = ? THEN f.player_b_discord_id ELSE f.player_a_discord_id END
     WHERE f.league_id = 1
       AND f.status = 'unplayed'
+      AND p.status = 'active'
       AND (f.player_a_discord_id = ? OR f.player_b_discord_id = ?)
     ORDER BY LOWER(p.tekken_tag) ASC
   `).all(discordUserId, discordUserId, discordUserId, discordUserId);
@@ -1640,7 +1643,7 @@ ${lines.join('\n')}`, ephemeral: false });
             '• /standings or /table — view live standings table anytime',
             '• /matches — view recent match IDs and statuses',
             '• /mydata — view your private stored profile details',
-            'Admins: /adminhelp, /points, /admin_vs, /bot_settings, /admin_status, /admin_player_matches, /admin_player_left, /admin_tournament_settings, /admin_setup_tournament, /admin_generate_fixtures, /admin_force_result, /admin_void_match, /admin_dispute_match, /admin_reset, /admin_reset_confirm, /admin_reset_league',
+            'Admins: /adminhelp, /points, /admin_vs, /bot_settings, /admin_status, /admin_player_matches, /admin_player_left, /admin_tournament_settings, /admin_setup_tournament, /admin_generate_fixtures, /admin_force_result, /admin_void_match, /admin_dispute_match, /admin_dq_player, /admin_rename_player, /admin_reset, /admin_reset_confirm, /admin_reset_league',
           ].join('\n'),
         });
         return;
@@ -1684,6 +1687,8 @@ ${lines.join('\n')}`, ephemeral: false });
             '• /admin_force_result — force a result for no-show/dispute scenarios.',
             '• /admin_void_match — remove result and reopen fixture.',
             '• /admin_dispute_match — mark a match disputed and notify staff.',
+            '• /admin_dq_player — disqualify a player (all fixtures count as 0-3 losses).',
+            '• /admin_rename_player — rename the player tag shown on standings/table.',
             '• /admin_reset and /admin_reset_league — request reset token (5 min expiry).',
             '• /admin_reset_confirm — confirm pending reset with your token.',
           ].join('\n'),
@@ -1929,6 +1934,40 @@ ${lines.join('\n')}`, ephemeral: false });
         }
 
         await interaction.reply({ content: buildLeftToPlayMessage(target.id), ephemeral: true });
+        return;
+      }
+
+      if (name === 'admin_rename_player') {
+        if (!isAdmin(interaction)) {
+          await interaction.reply({ content: 'Admin only.', ephemeral: true });
+          return;
+        }
+
+        const target = interaction.options.getUser('player', true);
+        const player = getPlayer(target.id);
+        if (!player) {
+          await interaction.reply({ content: 'That user is not signed up in the league.', ephemeral: true });
+          return;
+        }
+
+        const requestedTag = interaction.options.getString('tekken_tag', true);
+        const tekkenTag = cleanTekkenTag(requestedTag);
+        if (!tekkenTag) {
+          await interaction.reply({ content: 'Tekken tag cannot be empty.', ephemeral: true });
+          return;
+        }
+
+        db.prepare('UPDATE players SET tekken_tag = ? WHERE league_id = 1 AND discord_user_id = ?').run(tekkenTag, target.id);
+        logAudit('admin_rename_player', interaction.user.id, {
+          targetUserId: target.id,
+          from: player.tekken_tag,
+          to: tekkenTag,
+        });
+
+        await interaction.reply({
+          content: `Updated player tag: **${player.tekken_tag}** → **${tekkenTag}**.`,
+          ephemeral: true,
+        });
         return;
       }
 
@@ -2201,6 +2240,49 @@ ${buildTournamentSettingsMessage()}`,
         logAudit('admin_void_match', interaction.user.id, { matchId });
 
         await interaction.reply({ content: `Match ${matchId} voided and fixture reopened.`, ephemeral: true });
+        return;
+      }
+
+      if (name === 'admin_dq_player') {
+        if (!isAdmin(interaction)) {
+          await interaction.reply({ content: 'Admin only.', ephemeral: true });
+          return;
+        }
+
+        const target = interaction.options.getUser('player', true);
+        const reason = (interaction.options.getString('reason') || 'Manual admin disqualification').trim();
+        const player = getPlayer(target.id);
+        if (!player) {
+          await interaction.reply({ content: 'That user is not signed up in the league.', ephemeral: true });
+          return;
+        }
+
+        if (player.status === 'disqualified') {
+          await interaction.reply({ content: `${player.tekken_tag} is already disqualified.`, ephemeral: true });
+          return;
+        }
+
+        const tx = db.transaction(() => {
+          db.prepare("UPDATE players SET status = 'disqualified' WHERE league_id = 1 AND discord_user_id = ?").run(target.id);
+          db.prepare('DELETE FROM attendance WHERE league_id = 1 AND discord_user_id = ?').run(target.id);
+          db.prepare('DELETE FROM ready_queue WHERE league_id = 1 AND discord_user_id = ?').run(target.id);
+          db.prepare("UPDATE pending_matches SET accept_a = CASE WHEN player_a_discord_id = ? THEN 0 ELSE accept_a END, accept_b = CASE WHEN player_b_discord_id = ? THEN 0 ELSE accept_b END WHERE league_id = 1 AND (player_a_discord_id = ? OR player_b_discord_id = ?)").run(target.id, target.id, target.id, target.id);
+        });
+        tx();
+
+        logAudit('admin_dq_player', interaction.user.id, { targetUserId: target.id, reason });
+
+        const gs = getGuildSettings(interaction.guildId);
+        await sendAdminNotification(
+          interaction.guild,
+          gs,
+          `⛔ Player disqualified: <@${target.id}> (${target.id})\nReason: ${reason}\nAll fixtures now count as 0-3 losses for this player.`,
+        ).catch(() => null);
+
+        await interaction.reply({
+          content: `Disqualified ${player.tekken_tag}. Their fixtures are now scored as 0-3 forfeits, prior wins are overridden on standings, and allowance is forced to 0.`,
+          ephemeral: true,
+        });
         return;
       }
 

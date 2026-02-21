@@ -114,3 +114,41 @@ test('generateDoubleRoundRobinFixtures can run repeatedly without duplicating hi
 
   db.close();
 });
+
+
+test('computeStandings forces disqualified player fixtures to 0-3 losses retroactively', () => {
+  const db = setupDb();
+
+  // Two fixtures between u1 and u2 already recorded with u1 as winner.
+  db.prepare("INSERT INTO fixtures (league_id, player_a_discord_id, player_b_discord_id, leg_number, status, confirmed_at) VALUES (1,'u1','u2',1,'confirmed',datetime('now'))").run();
+  db.prepare("INSERT INTO matches (league_id, fixture_id, player_a_discord_id, player_b_discord_id, state, ended_at) VALUES (1,1,'u1','u2','confirmed',datetime('now'))").run();
+  db.prepare("INSERT INTO results (match_id, winner_discord_id, score_a, score_b, is_forfeit, reporter_discord_id, confirmer_discord_id, confirmed_at) VALUES (1,'u1',3,1,0,'u1','u2',datetime('now'))").run();
+
+  db.prepare("INSERT INTO fixtures (league_id, player_a_discord_id, player_b_discord_id, leg_number, status, confirmed_at) VALUES (1,'u2','u1',2,'confirmed',datetime('now'))").run();
+  db.prepare("INSERT INTO matches (league_id, fixture_id, player_a_discord_id, player_b_discord_id, state, ended_at) VALUES (1,2,'u2','u1','confirmed',datetime('now'))").run();
+  db.prepare("INSERT INTO results (match_id, winner_discord_id, score_a, score_b, is_forfeit, reporter_discord_id, confirmer_discord_id, confirmed_at) VALUES (2,'u1',0,3,0,'u1','u2',datetime('now'))").run();
+
+  // Disqualify u1 after those wins.
+  db.prepare("UPDATE players SET status = 'disqualified' WHERE league_id = 1 AND discord_user_id = 'u1'").run();
+
+  const standings = computeStandings(db, 1);
+  const u1 = standings.find((r) => r.discord_user_id === 'u1');
+  const u2 = standings.find((r) => r.discord_user_id === 'u2');
+
+  assert.ok(u1);
+  assert.ok(u2);
+  assert.equal(u1.status, 'disqualified');
+  assert.equal(u1.wins, 0);
+  assert.equal(u1.losses, 2);
+  assert.equal(u1.games_won, 0);
+  assert.equal(u1.games_lost, 6);
+  assert.equal(u1.points, 0);
+
+  assert.equal(u2.wins, 2);
+  assert.equal(u2.losses, 0);
+  assert.equal(u2.games_won, 6);
+  assert.equal(u2.games_lost, 0);
+  assert.equal(u2.points, 6);
+
+  db.close();
+});
