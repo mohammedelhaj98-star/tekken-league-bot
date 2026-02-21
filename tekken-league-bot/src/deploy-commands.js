@@ -176,6 +176,20 @@ const commands = [
       .setRequired(true))
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 
+  new SlashCommandBuilder()
+    .setName('admin_rename_player')
+    .setDescription('Admin: change a player Tekken tag shown on standings/table')
+    .addUserOption(o => o
+      .setName('player')
+      .setDescription('Player to rename')
+      .setRequired(true))
+    .addStringOption(o => o
+      .setName('tekken_tag')
+      .setDescription('New Tekken tag / table name')
+      .setRequired(true)
+      .setMaxLength(40))
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
 
   new SlashCommandBuilder()
     .setName('admin_setup_tournament')
@@ -311,6 +325,20 @@ const commands = [
       .setName('match_id')
       .setDescription('Match ID')
       .setRequired(true))
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
+  new SlashCommandBuilder()
+    .setName('admin_dq_player')
+    .setDescription('Admin: disqualify a player (all their matches become 0-3 forfeits, allowance=0)')
+    .addUserOption(o => o
+      .setName('player')
+      .setDescription('Player to disqualify')
+      .setRequired(true))
+    .addStringOption(o => o
+      .setName('reason')
+      .setDescription('Reason for disqualification')
+      .setRequired(false)
+      .setMaxLength(200))
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 
 ];
