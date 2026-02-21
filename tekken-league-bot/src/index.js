@@ -2291,7 +2291,6 @@ ${buildTournamentSettingsMessage()}`,
         ephemeral: true,
       });
       return;
-    }
 
     if (interaction.isModalSubmit()) {
       if (interaction.customId === 'signup_modal') {
@@ -2381,6 +2380,7 @@ ${buildTournamentSettingsMessage()}`,
         return;
       }
     }
+
 
   } catch (err) {
     console.error(err);
