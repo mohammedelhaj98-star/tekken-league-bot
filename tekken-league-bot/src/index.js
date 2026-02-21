@@ -194,9 +194,15 @@ function upsertLastSeenDisplayName(discord_user_id, displayName) {
   `).run(displayName, discord_user_id);
 }
 
-function getPlayer(discord_user_id) {
+function getPlayer(discord_user_id, { includeDisqualified = false } = {}) {
+  if (includeDisqualified) {
+    return db.prepare(`
+      SELECT * FROM players WHERE league_id = 1 AND discord_user_id = ? AND status IN ('active', 'disqualified')
+    `).get(discord_user_id);
+  }
+
   return db.prepare(`
-    SELECT * FROM players WHERE league_id = 1 AND discord_user_id = ? AND status IN ('active', 'disqualified')
+    SELECT * FROM players WHERE league_id = 1 AND discord_user_id = ? AND status = 'active'
   `).get(discord_user_id);
 }
 
@@ -1944,7 +1950,7 @@ ${lines.join('\n')}`, ephemeral: false });
         }
 
         const target = interaction.options.getUser('player', true);
-        const player = getPlayer(target.id);
+        const player = getPlayer(target.id, { includeDisqualified: true });
         if (!player) {
           await interaction.reply({ content: 'That user is not signed up in the league.', ephemeral: true });
           return;
@@ -2251,7 +2257,7 @@ ${buildTournamentSettingsMessage()}`,
 
         const target = interaction.options.getUser('player', true);
         const reason = (interaction.options.getString('reason') || 'Manual admin disqualification').trim();
-        const player = getPlayer(target.id);
+        const player = getPlayer(target.id, { includeDisqualified: true });
         if (!player) {
           await interaction.reply({ content: 'That user is not signed up in the league.', ephemeral: true });
           return;
@@ -2266,6 +2272,7 @@ ${buildTournamentSettingsMessage()}`,
           db.prepare("UPDATE players SET status = 'disqualified' WHERE league_id = 1 AND discord_user_id = ?").run(target.id);
           db.prepare('DELETE FROM attendance WHERE league_id = 1 AND discord_user_id = ?').run(target.id);
           db.prepare('DELETE FROM ready_queue WHERE league_id = 1 AND discord_user_id = ?').run(target.id);
+          db.prepare("UPDATE matches SET state = 'cancelled', ended_at = datetime('now') WHERE league_id = 1 AND (player_a_discord_id = ? OR player_b_discord_id = ?) AND state IN ('pending','reported','active','disputed')").run(target.id, target.id);
           db.prepare("UPDATE pending_matches SET accept_a = CASE WHEN player_a_discord_id = ? THEN 0 ELSE accept_a END, accept_b = CASE WHEN player_b_discord_id = ? THEN 0 ELSE accept_b END WHERE league_id = 1 AND (player_a_discord_id = ? OR player_b_discord_id = ?)").run(target.id, target.id, target.id, target.id);
         });
         tx();
