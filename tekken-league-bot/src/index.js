@@ -328,6 +328,13 @@ function daysBetweenInclusive(startDateIso, endDateIso) {
   return Math.max(1, days);
 }
 
+function getElapsedAttendanceDays(startDateIso, todayIso, seasonDays) {
+  const totalDays = Math.max(1, Number(seasonDays || 1));
+  const inclusive = daysBetweenInclusive(startDateIso, todayIso);
+  // Count only fully elapsed tournament days (today should not reduce allowance yet).
+  return Math.max(0, Math.min(totalDays, inclusive - 1));
+}
+
 function getQatarNowParts(now = new Date()) {
   const parts = new Intl.DateTimeFormat('en-GB', {
     timeZone: QATAR_TIMEZONE,
@@ -579,8 +586,7 @@ function buildStandingsTablePages() {
   const seasonDays = Math.max(1, Number(league.season_days || 20));
   const startDate = String(league.tournament_start_date || getTodayISO(true));
   const today = getTodayISO(true);
-  const elapsedDays = Math.max(1, daysBetweenInclusive(startDate, today));
-  const tournamentDaysElapsed = Math.min(seasonDays, elapsedDays);
+  const tournamentDaysElapsed = getElapsedAttendanceDays(startDate, today, seasonDays);
   const missedAllowance = 5;
   const minCheckinsRequired = Math.max(0, tournamentDaysElapsed - missedAllowance);
   const activePlayerCount = db.prepare(`
@@ -618,7 +624,9 @@ function buildStandingsTablePages() {
   const rows = standings.map((s, idx) => {
     const checkins = attendanceById.get(s.discord_user_id) || 0;
     const missedDays = Math.max(0, tournamentDaysElapsed - checkins);
-    const showPct = Math.max(0, Math.min(100, Math.round(((tournamentDaysElapsed - missedDays) / tournamentDaysElapsed) * 100)));
+    const showPct = tournamentDaysElapsed === 0
+      ? 100
+      : Math.max(0, Math.min(100, Math.round(((tournamentDaysElapsed - missedDays) / tournamentDaysElapsed) * 100)));
     const completed = completedByPlayer.get(s.discord_user_id) || 0;
     const finishedMatches = requiredFixturesPerPlayer > 0 && completed >= requiredFixturesPerPlayer;
     const allowanceRemaining = Math.max(0, missedAllowance - missedDays);
@@ -660,7 +668,7 @@ function buildStandingsTablePages() {
 
   const legend = [
     'Legend: #=Rank | PLAYER=Tag | PTS=Points | GP=Games played | W/L=Wins/Losses | DIFF=Game diff | GW=Games won | SHOW%=Attendance | ALLOW=Missed check-ins left',
-    `Attendance starts at 100% and decreases by missed days since start (${startDate}). Check-in allowance left is shown as a number (max ${missedAllowance}).`,
+    `Attendance starts at 100% and decreases by missed fully elapsed days since start (${startDate}). Check-in allowance left is shown as a number (max ${missedAllowance}).`,
     `Elapsed days: ${tournamentDaysElapsed}/${seasonDays}. Minimum check-ins now: ${minCheckinsRequired}. Finished all fixtures early => EXEMPT.`,
     '',
   ].join('\n');
@@ -726,7 +734,7 @@ function buildTournamentSettingsMessage() {
   const dropPerDay = (s.season_days || 0) > 0 ? (100 / s.season_days).toFixed(2) : '0.00';
   const startDate = String(s.tournament_start_date || getTodayISO(true));
   const today = getTodayISO(true);
-  const elapsedDays = Math.max(1, Math.min(s.season_days || 0, daysBetweenInclusive(startDate, today)));
+  const elapsedDays = getElapsedAttendanceDays(startDate, today, s.season_days || 0);
   const points = getLeaguePointRules(db, 1);
 
   return [
@@ -739,7 +747,7 @@ function buildTournamentSettingsMessage() {
     `Start of each time slot: ${s.timeslot_starts}`,
     `Total tournament days: ${s.season_days}`,
     `Tournament start date: ${startDate}`,
-    `Elapsed tournament days (for attendance): ${elapsedDays}`,
+    `Elapsed fully-completed tournament days (for attendance): ${elapsedDays}`,
     `SHOW% behavior: starts at 100% and drops by ${dropPerDay}% per missed day`,
     `Minimum show up % required (eligibility threshold): ${minShowupPercent}%`,
     `Minimum check-in days required: ${effectiveMinAttendanceDays} (includes max ${missedAllowance} missed check-ins allowance)`,
