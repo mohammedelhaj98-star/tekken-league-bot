@@ -221,6 +221,10 @@ const commands = [
       .setName('timeslot_duration_minutes')
       .setDescription('Duration of each timeslot in minutes (15-1440)')
       .setRequired(false))
+    .addIntegerOption(o => o
+      .setName('auto_unready_minutes')
+      .setDescription('Auto-unready after this many minutes in queue (1-1440, default 20)')
+      .setRequired(false))
     .addStringOption(o => o
       .setName('timeslot_starts')
       .setDescription('Comma-separated start times in 24h format, e.g. 18:00,20:00')
