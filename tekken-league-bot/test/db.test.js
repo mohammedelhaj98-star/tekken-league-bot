@@ -72,3 +72,14 @@ test('initDb adds configurable points columns and admin override control columns
 
   db.close();
 });
+
+
+test('initDb adds player allowance bonus column', () => {
+  const db = new Database(':memory:');
+  initDb(db);
+
+  const playerCols = db.prepare("PRAGMA table_info(players)").all().map((c) => c.name);
+  assert.equal(playerCols.includes('allowance_bonus_days'), true);
+
+  db.close();
+});

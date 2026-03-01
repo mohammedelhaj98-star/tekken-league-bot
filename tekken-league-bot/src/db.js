@@ -47,6 +47,7 @@ function initDb(db) {
       email_enc TEXT NOT NULL,
       phone_enc TEXT NOT NULL,
       status TEXT NOT NULL DEFAULT 'active',
+      allowance_bonus_days INTEGER NOT NULL DEFAULT 0,
       signup_at TEXT NOT NULL DEFAULT (datetime('now')),
       FOREIGN KEY (league_id) REFERENCES leagues(league_id)
     );
@@ -238,6 +239,7 @@ function initDb(db) {
   ensureColumn('admin_match_overrides', 'winner_selected', 'winner_selected INTEGER NOT NULL DEFAULT 0');
   ensureColumn('guild_settings', 'dispute_channel_id', 'dispute_channel_id TEXT');
   ensureColumn('guild_settings', 'activity_channel_id', 'activity_channel_id TEXT');
+  ensureColumn('players', 'allowance_bonus_days', 'allowance_bonus_days INTEGER NOT NULL DEFAULT 0');
 
 
   const createIndexStatements = [
