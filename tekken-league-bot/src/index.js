@@ -465,6 +465,23 @@ function getReadyQueueSnapshot() {
   `).all();
 }
 
+function getReadyWindowMinutes(leagueRow = null) {
+  const league = leagueRow || db.prepare('SELECT timeslot_duration_minutes FROM leagues WHERE league_id = 1').get() || {};
+  const minutes = Number(league.timeslot_duration_minutes || 120);
+  if (!Number.isFinite(minutes)) return 120;
+  return Math.max(1, Math.min(1440, Math.trunc(minutes)));
+}
+
+function purgeExpiredReadyQueueEntries(leagueRow = null) {
+  const windowMinutes = getReadyWindowMinutes(leagueRow);
+  const result = db.prepare(`
+    DELETE FROM ready_queue
+    WHERE league_id = 1
+      AND ((julianday('now') - julianday(since_ts)) * 24 * 60) >= ?
+  `).run(windowMinutes);
+  return Number(result?.changes || 0);
+}
+
 
 function buildMatchesMessage(limit = 30, discordUserId = null) {
   const rows = discordUserId
@@ -533,6 +550,7 @@ function buildLeftToPlayMessage(discordUserId) {
     FROM fixtures f
     LEFT JOIN players p
       ON p.league_id = f.league_id
+      AND p.status = 'active'
       AND p.discord_user_id = CASE
         WHEN f.player_a_discord_id = ? THEN f.player_b_discord_id
         ELSE f.player_a_discord_id
@@ -540,6 +558,7 @@ function buildLeftToPlayMessage(discordUserId) {
     WHERE f.league_id = 1
       AND (f.player_a_discord_id = ? OR f.player_b_discord_id = ?)
       AND f.status IN ('unplayed', 'locked_in_match')
+      AND p.discord_user_id IS NOT NULL
     GROUP BY opponent_id, opponent_tag
   `).all(discordUserId, discordUserId, discordUserId, discordUserId);
 
@@ -614,6 +633,12 @@ function buildStandingsTablePages() {
     GROUP BY discord_user_id
   `).all();
   const attendanceById = new Map(attendanceRows.map((r) => [r.discord_user_id, Number(r.checkin_days || 0)]));
+  const allowanceBonusRows = db.prepare(`
+    SELECT discord_user_id, allowance_bonus_days
+    FROM players
+    WHERE league_id = 1
+  `).all();
+  const allowanceBonusById = new Map(allowanceBonusRows.map((r) => [r.discord_user_id, Number(r.allowance_bonus_days || 0)]));
   const formatCell = (value, maxLen = 32) => {
     const text = String(value ?? '');
     if (text.length <= maxLen) return text;
@@ -629,7 +654,8 @@ function buildStandingsTablePages() {
       : Math.max(0, Math.min(100, Math.round(((tournamentDaysElapsed - missedDays) / tournamentDaysElapsed) * 100)));
     const completed = completedByPlayer.get(s.discord_user_id) || 0;
     const finishedMatches = requiredFixturesPerPlayer > 0 && completed >= requiredFixturesPerPlayer;
-    const allowanceRemaining = Math.max(0, missedAllowance - missedDays);
+    const allowanceBonus = Math.max(0, allowanceBonusById.get(s.discord_user_id) || 0);
+    const allowanceRemaining = Math.max(0, (missedAllowance + allowanceBonus) - missedDays);
     const allowanceText = s.status === 'disqualified'
       ? '0'
       : (finishedMatches ? `EXEMPT (${allowanceRemaining})` : `${allowanceRemaining}`);
@@ -668,7 +694,7 @@ function buildStandingsTablePages() {
 
   const legend = [
     'Legend: #=Rank | PLAYER=Tag | PTS=Points | GP=Games played | W/L=Wins/Losses | DIFF=Game diff | GW=Games won | SHOW%=Attendance | ALLOW=Missed check-ins left',
-    `Attendance starts at 100% and decreases by missed fully elapsed days since start (${startDate}). Check-in allowance left is shown as a number (max ${missedAllowance}).`,
+    `Attendance starts at 100% and decreases by missed fully elapsed days since start (${startDate}). Check-in allowance left is shown as a number (base max ${missedAllowance} + player bonus).`,
     `Elapsed days: ${tournamentDaysElapsed}/${seasonDays}. Minimum check-ins now: ${minCheckinsRequired}. Finished all fixtures early => EXEMPT.`,
     '',
   ].join('\n');
@@ -776,6 +802,13 @@ function removeFromReadyQueue(discord_user_id) {
   db.prepare(`
     DELETE FROM ready_queue WHERE league_id = 1 AND discord_user_id = ?
   `).run(discord_user_id);
+}
+
+function clearReadyQueueForClosedCheckin() {
+  const queueCount = Number(db.prepare('SELECT COUNT(1) AS c FROM ready_queue WHERE league_id = 1').get().c || 0);
+  if (queueCount <= 0) return 0;
+  db.prepare('DELETE FROM ready_queue WHERE league_id = 1').run();
+  return queueCount;
 }
 
 function popReadyUsers() {
@@ -941,6 +974,27 @@ async function createPendingMatch(fixture, channel, guildId) {
 
 async function tryMatchmake(guild) {
   const settings = getGuildSettings(guild.id);
+  const league = db.prepare('SELECT timeslot_duration_minutes, timeslot_starts FROM leagues WHERE league_id = 1').get() || {};
+  const checkinStatus = buildCheckinWindowStatus(league);
+  if (!checkinStatus.inSlot) {
+    const removedCount = clearReadyQueueForClosedCheckin();
+    if (removedCount > 0) {
+      logAudit('queue_auto_cleared_checkin_closed', null, {
+        guildId: guild.id,
+        removedCount,
+        nowHHMM: checkinStatus.nowHHMM,
+        nextStart: checkinStatus.nextStart,
+      });
+      await sendActivityNotification(guild, settings, `🕒 Check-in is closed (${checkinStatus.nowHHMM}). Cleared ready queue (${removedCount} player${removedCount === 1 ? '' : 's'}).`).catch(() => null);
+    }
+    return;
+  }
+
+  const expiredRemoved = purgeExpiredReadyQueueEntries(league);
+  if (expiredRemoved > 0) {
+    logAudit('queue_auto_unready_expired', null, { guildId: guild.id, removedCount: expiredRemoved, readyWindowMinutes: getReadyWindowMinutes(league) });
+  }
+
   const channelId = settings.results_channel_id || MATCH_CHANNEL_ID;
   if (!channelId) return;
 
@@ -1551,6 +1605,22 @@ async function handleInteractionCreate(interaction) {
           return;
         }
 
+        const league = db.prepare('SELECT timeslot_duration_minutes, timeslot_starts FROM leagues WHERE league_id = 1').get() || {};
+        const checkinStatus = buildCheckinWindowStatus(league);
+        if (!checkinStatus.inSlot) {
+          const removedCount = clearReadyQueueForClosedCheckin();
+          if (removedCount > 0) {
+            logAudit('queue_auto_cleared_checkin_closed', interaction.user.id, {
+              removedCount,
+              nowHHMM: checkinStatus.nowHHMM,
+              nextStart: checkinStatus.nextStart,
+            });
+            await sendActivityNotification(interaction.guild, getGuildSettings(interaction.guildId), `🕒 Check-in is closed (${checkinStatus.nowHHMM}). Cleared ready queue (${removedCount} player${removedCount === 1 ? '' : 's'}).`).catch(() => null);
+          }
+          await interaction.reply({ content: `Queue is closed because check-in is over for now. Next slot: ${checkinStatus.nextStart} (${checkinStatus.nextStartDayText}).` });
+          return;
+        }
+
         if (!hasCheckedInToday(interaction.user.id)) {
           await interaction.reply({ content: 'Please /checkin for today first (attendance rule).' });
           return;
@@ -1561,6 +1631,7 @@ async function handleInteractionCreate(interaction) {
           return;
         }
 
+        purgeExpiredReadyQueueEntries(league);
         addToReadyQueue(interaction.user.id);
         logAudit('queue_join', interaction.user.id);
         await sendActivityNotification(interaction.guild, getGuildSettings(interaction.guildId), `🟢 Ready: <@${interaction.user.id}> joined the queue.`).catch(() => null);
@@ -1611,6 +1682,7 @@ async function handleInteractionCreate(interaction) {
       }
 
       if (name === 'queue') {
+        purgeExpiredReadyQueueEntries();
         const queue = getReadyQueueSnapshot();
         if (!queue.length) {
           await interaction.reply({ content: 'Ready queue is currently empty.', ephemeral: false });
@@ -1657,7 +1729,7 @@ ${lines.join('\n')}`, ephemeral: false });
             '• /standings or /table — view live standings table anytime',
             '• /matches — view recent match IDs and statuses',
             '• /mydata — view your private stored profile details',
-            'Admins: /adminhelp, /points, /admin_vs, /bot_settings, /admin_status, /admin_player_matches, /admin_player_left, /admin_tournament_settings, /admin_setup_tournament, /admin_generate_fixtures, /admin_force_result, /admin_void_match, /admin_dispute_match, /admin_dq_player, /admin_rename_player, /admin_reset, /admin_reset_confirm, /admin_reset_league',
+            'Admins: /adminhelp, /points, /admin_vs, /bot_settings, /admin_status, /admin_player_matches, /admin_player_left, /admin_tournament_settings, /admin_setup_tournament, /admin_generate_fixtures, /admin_force_result, /admin_void_match, /admin_dispute_match, /admin_dq_player, /admin_rename_player, /admin_allowance_player, /admin_reset, /admin_reset_confirm, /admin_reset_league',
           ].join('\n'),
         });
         return;
@@ -1670,7 +1742,7 @@ ${lines.join('\n')}`, ephemeral: false });
             '**Player Help**',
             '1) `/signup` to register your league details.',
             '2) `/checkin` daily to count attendance.',
-            '3) `/ready` when you can play now, `/unready` when you cannot.',
+            '3) `/ready` during open check-in windows, `/unready` when you cannot play.',
             '4) Use `/standings` or `/table` anytime for the league table.',
             '5) Use `/queue` to see who is currently available.',
             '6) Use `/left` to see opponents and remaining matches sorted by priority.',
@@ -1703,6 +1775,7 @@ ${lines.join('\n')}`, ephemeral: false });
             '• /admin_dispute_match — mark a match disputed and notify staff.',
             '• /admin_dq_player — disqualify a player (all fixtures count as 0-3 losses).',
             '• /admin_rename_player — rename the player tag shown on standings/table.',
+            '• /admin_allowance_player — add/remove extra missed check-in allowance days.',
             '• /admin_reset and /admin_reset_league — request reset token (5 min expiry).',
             '• /admin_reset_confirm — confirm pending reset with your token.',
           ].join('\n'),
@@ -1980,6 +2053,38 @@ ${lines.join('\n')}`, ephemeral: false });
 
         await interaction.reply({
           content: `Updated player tag: **${player.tekken_tag}** → **${tekkenTag}**.`,
+          ephemeral: true,
+        });
+        return;
+      }
+
+      if (name === 'admin_allowance_player') {
+        if (!isAdmin(interaction)) {
+          await interaction.reply({ content: 'Admin only.', ephemeral: true });
+          return;
+        }
+
+        const target = interaction.options.getUser('player', true);
+        const deltaDays = interaction.options.getInteger('days', true);
+        const player = getPlayer(target.id, { includeDisqualified: true });
+        if (!player) {
+          await interaction.reply({ content: 'That user is not signed up in the league.', ephemeral: true });
+          return;
+        }
+
+        const currentBonus = Math.max(0, Number(player.allowance_bonus_days || 0));
+        const nextBonus = Math.max(0, currentBonus + Number(deltaDays || 0));
+
+        db.prepare('UPDATE players SET allowance_bonus_days = ? WHERE league_id = 1 AND discord_user_id = ?').run(nextBonus, target.id);
+        logAudit('admin_allowance_player', interaction.user.id, {
+          targetUserId: target.id,
+          deltaDays,
+          from: currentBonus,
+          to: nextBonus,
+        });
+
+        await interaction.reply({
+          content: `Updated allowance bonus for **${player.tekken_tag}**: ${currentBonus} → ${nextBonus} day(s).`,
           ephemeral: true,
         });
         return;
