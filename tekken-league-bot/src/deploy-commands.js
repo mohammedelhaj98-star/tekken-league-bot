@@ -190,6 +190,21 @@ const commands = [
       .setMaxLength(40))
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 
+  new SlashCommandBuilder()
+    .setName('admin_allowance_player')
+    .setDescription('Admin: add/remove extra check-in allowance days for one player')
+    .addUserOption(o => o
+      .setName('player')
+      .setDescription('Player to update')
+      .setRequired(true))
+    .addIntegerOption(o => o
+      .setName('days')
+      .setDescription('Positive adds allowance, negative removes allowance')
+      .setRequired(true)
+      .setMinValue(-365)
+      .setMaxValue(365))
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
 
   new SlashCommandBuilder()
     .setName('admin_setup_tournament')
