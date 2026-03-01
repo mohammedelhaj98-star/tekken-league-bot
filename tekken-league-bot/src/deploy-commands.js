@@ -190,6 +190,21 @@ const commands = [
       .setMaxLength(40))
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 
+  new SlashCommandBuilder()
+    .setName('admin_allowance_player')
+    .setDescription('Admin: add/remove extra check-in allowance days for one player')
+    .addUserOption(o => o
+      .setName('player')
+      .setDescription('Player to update')
+      .setRequired(true))
+    .addIntegerOption(o => o
+      .setName('days')
+      .setDescription('Positive adds allowance, negative removes allowance')
+      .setRequired(true)
+      .setMinValue(-365)
+      .setMaxValue(365))
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
 
   new SlashCommandBuilder()
     .setName('admin_setup_tournament')
@@ -205,6 +220,10 @@ const commands = [
     .addIntegerOption(o => o
       .setName('timeslot_duration_minutes')
       .setDescription('Duration of each timeslot in minutes (15-1440)')
+      .setRequired(false))
+    .addIntegerOption(o => o
+      .setName('auto_unready_minutes')
+      .setDescription('Auto-unready after this many minutes in queue (1-1440, default 20)')
       .setRequired(false))
     .addStringOption(o => o
       .setName('timeslot_starts')
