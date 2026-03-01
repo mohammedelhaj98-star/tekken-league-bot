@@ -484,8 +484,8 @@ function getReadyQueueSnapshot() {
 }
 
 function getReadyWindowMinutes(leagueRow = null) {
-  const league = leagueRow || db.prepare('SELECT timeslot_duration_minutes FROM leagues WHERE league_id = 1').get() || {};
-  const minutes = Number(league.timeslot_duration_minutes || 120);
+  const league = leagueRow || db.prepare('SELECT auto_unready_minutes FROM leagues WHERE league_id = 1').get() || {};
+  const minutes = Number(league.auto_unready_minutes || 20);
   if (!Number.isFinite(minutes)) return 120;
   return Math.max(1, Math.min(1440, Math.trunc(minutes)));
 }
@@ -761,6 +761,7 @@ function getLeagueSettings() {
       max_players,
       timeslot_count,
       timeslot_duration_minutes,
+      auto_unready_minutes,
       timeslot_starts
     FROM leagues
     WHERE league_id = 1
@@ -788,6 +789,7 @@ function buildTournamentSettingsMessage() {
     `No. of Players (max): ${s.max_players}`,
     `No. of Timeslots: ${s.timeslot_count}`,
     `Duration of Time slots: ${s.timeslot_duration_minutes} minutes`,
+    `Auto-unready after: ${s.auto_unready_minutes} minutes`,
     `Start of each time slot: ${s.timeslot_starts}`,
     `Total tournament days: ${s.season_days}`,
     `Tournament start date: ${startDate}`,
@@ -992,7 +994,7 @@ async function createPendingMatch(fixture, channel, guildId) {
 
 async function tryMatchmake(guild) {
   const settings = getGuildSettings(guild.id);
-  const league = db.prepare('SELECT timeslot_duration_minutes, timeslot_starts FROM leagues WHERE league_id = 1').get() || {};
+  const league = db.prepare('SELECT timeslot_duration_minutes, auto_unready_minutes, timeslot_starts FROM leagues WHERE league_id = 1').get() || {};
   const checkinStatus = buildCheckinWindowStatus(league);
   if (!checkinStatus.inSlot) {
     const removedCount = clearReadyQueueForClosedCheckin();
@@ -1551,7 +1553,7 @@ async function handleInteractionCreate(interaction) {
           return;
         }
 
-        const league = db.prepare('SELECT timeslot_duration_minutes, timeslot_starts FROM leagues WHERE league_id = 1').get() || {};
+        const league = db.prepare('SELECT timeslot_duration_minutes, auto_unready_minutes, timeslot_starts FROM leagues WHERE league_id = 1').get() || {};
         const status = buildCheckinWindowStatus(league);
         const today = getTodayISO(true);
 
@@ -1623,7 +1625,7 @@ async function handleInteractionCreate(interaction) {
           return;
         }
 
-        const league = db.prepare('SELECT timeslot_duration_minutes, timeslot_starts FROM leagues WHERE league_id = 1').get() || {};
+        const league = db.prepare('SELECT timeslot_duration_minutes, auto_unready_minutes, timeslot_starts FROM leagues WHERE league_id = 1').get() || {};
         const checkinStatus = buildCheckinWindowStatus(league);
         if (!checkinStatus.inSlot) {
           const removedCount = clearReadyQueueForClosedCheckin();
@@ -2127,6 +2129,7 @@ ${lines.join('\n')}`, ephemeral: false });
         const maxPlayers = interaction.options.getInteger('max_players');
         const timeslotCount = interaction.options.getInteger('timeslot_count');
         const timeslotDurationMinutes = interaction.options.getInteger('timeslot_duration_minutes');
+        const autoUnreadyMinutes = interaction.options.getInteger('auto_unready_minutes');
         const timeSlotStartsRaw = interaction.options.getString('timeslot_starts');
         const clearTimeslotStarts = interaction.options.getBoolean('clear_timeslot_starts') === true;
         const totalTournamentDays = interaction.options.getInteger('total_tournament_days');
@@ -2141,7 +2144,7 @@ ${lines.join('\n')}`, ephemeral: false });
           return;
         }
 
-        const hasAnyUpdate = [maxPlayers, timeslotCount, timeslotDurationMinutes, timeSlotStartsRaw, totalTournamentDays, minimumShowupPercent, tournamentStartDateRaw]
+        const hasAnyUpdate = [maxPlayers, timeslotCount, timeslotDurationMinutes, autoUnreadyMinutes, timeSlotStartsRaw, totalTournamentDays, minimumShowupPercent, tournamentStartDateRaw]
           .some(v => v !== null && v !== undefined);
         if (!hasAnyUpdate && !clearTimeslotStarts) {
           await interaction.reply({
@@ -2156,6 +2159,7 @@ ${buildTournamentSettingsMessage()}`,
           maxPlayers,
           timeslotCount,
           timeslotDurationMinutes,
+          autoUnreadyMinutes,
           timeSlotStartsRaw,
           clearTimeslotStarts,
           totalTournamentDays,
@@ -2173,6 +2177,7 @@ ${buildTournamentSettingsMessage()}`,
           max_players: validated.values.max_players ?? current.max_players,
           timeslot_count: validated.values.timeslot_count ?? current.timeslot_count,
           timeslot_duration_minutes: validated.values.timeslot_duration_minutes ?? current.timeslot_duration_minutes,
+          auto_unready_minutes: validated.values.auto_unready_minutes ?? current.auto_unready_minutes,
           timeslot_starts: validated.values.timeslot_starts ?? current.timeslot_starts,
           season_days: validated.values.season_days ?? current.season_days,
           eligibility_min_percent: validated.values.eligibility_min_percent ?? current.eligibility_min_percent,
@@ -2204,6 +2209,7 @@ ${buildTournamentSettingsMessage()}`,
             max_players = ?,
             timeslot_count = ?,
             timeslot_duration_minutes = ?,
+            auto_unready_minutes = ?,
             timeslot_starts = ?,
             season_days = ?,
             eligibility_min_percent = ?,
@@ -2214,6 +2220,7 @@ ${buildTournamentSettingsMessage()}`,
           merged.max_players,
           merged.timeslot_count,
           merged.timeslot_duration_minutes,
+          merged.auto_unready_minutes,
           merged.timeslot_starts,
           merged.season_days,
           merged.eligibility_min_percent,

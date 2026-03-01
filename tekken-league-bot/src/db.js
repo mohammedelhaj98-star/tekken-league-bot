@@ -31,6 +31,7 @@ function initDb(db) {
       max_players INTEGER NOT NULL DEFAULT 64,
       timeslot_count INTEGER NOT NULL DEFAULT 4,
       timeslot_duration_minutes INTEGER NOT NULL DEFAULT 120,
+      auto_unready_minutes INTEGER NOT NULL DEFAULT 20,
       timeslot_starts TEXT NOT NULL DEFAULT '18:00,20:00,22:00,00:00',
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
@@ -230,6 +231,7 @@ function initDb(db) {
   ensureColumn('leagues', 'timeslot_count', 'timeslot_count INTEGER NOT NULL DEFAULT 4');
   ensureColumn('leagues', 'timeslot_duration_minutes', 'timeslot_duration_minutes INTEGER NOT NULL DEFAULT 120');
   ensureColumn('leagues', 'timeslot_starts', "timeslot_starts TEXT NOT NULL DEFAULT '18:00,20:00,22:00,00:00'");
+  ensureColumn('leagues', 'auto_unready_minutes', 'auto_unready_minutes INTEGER NOT NULL DEFAULT 20');
   ensureColumn('matches', 'guild_id', 'guild_id TEXT');
   ensureColumn('matches', 'match_channel_id', 'match_channel_id TEXT');
   ensureColumn('matches', 'match_message_id', 'match_message_id TEXT');
