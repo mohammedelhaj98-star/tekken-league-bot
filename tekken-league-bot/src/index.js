@@ -218,6 +218,24 @@ function logAudit(actionType, actorDiscordId, payload = null) {
   `).run(actorDiscordId || null, actionType, payload ? JSON.stringify(payload) : null);
 }
 
+function isUnknownInteractionError(err) {
+  if (!err) return false;
+  if (Number(err.code) === 10062) return true;
+  return /unknown interaction/i.test(String(err.message || ''));
+}
+
+async function safeInteractionReply(interaction, payload) {
+  try {
+    if (interaction.deferred || interaction.replied) {
+      return await interaction.followUp(payload);
+    }
+    return await interaction.reply(payload);
+  } catch (err) {
+    if (isUnknownInteractionError(err)) return null;
+    throw err;
+  }
+}
+
 
 function getGuildSettings(guildId) {
   const id = String(guildId || '');
@@ -1514,7 +1532,7 @@ async function handleInteractionCreate(interaction) {
         const email = decryptString(p.email_enc);
         const phone = decryptString(p.phone_enc);
 
-        await interaction.reply({
+        await safeInteractionReply(interaction, {
           content: [
             `Real name: ${realName}`,
             `Tekken tag: ${p.tekken_tag}`,
@@ -1737,7 +1755,7 @@ ${lines.join('\n')}`, ephemeral: false });
 
 
       if (name === 'helpplayer' || name === 'playerhelp') {
-        await interaction.reply({
+        await safeInteractionReply(interaction, {
           content: [
             '**Player Help**',
             '1) `/signup` to register your league details.',
@@ -1755,11 +1773,11 @@ ${lines.join('\n')}`, ephemeral: false });
 
       if (name === 'adminhelp') {
         if (!isAdmin(interaction)) {
-          await interaction.reply({ content: 'Admin only.', ephemeral: true });
+          await safeInteractionReply(interaction, { content: 'Admin only.', ephemeral: true });
           return;
         }
 
-        await interaction.reply({
+        await safeInteractionReply(interaction, {
           content: [
             '**Admin Commands Help**',
             '• /admin_status — quick league health + queue snapshot.',
@@ -2503,12 +2521,16 @@ ${buildTournamentSettingsMessage()}`,
     }
 
   } catch (err) {
+    if (isUnknownInteractionError(err)) {
+      console.warn('Interaction expired before response (Unknown interaction).');
+      return;
+    }
     console.error(err);
     try {
       if (interaction.deferred || interaction.replied) {
         await interaction.followUp({ content: 'An error occurred.', ephemeral: true });
       } else {
-        await interaction.reply({ content: 'An error occurred.', ephemeral: true });
+        await safeInteractionReply(interaction, { content: 'An error occurred.', ephemeral: true });
       }
     } catch (_) {
       // ignore
