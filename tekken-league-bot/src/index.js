@@ -10,6 +10,7 @@ const {
   ActionRowBuilder,
   PermissionsBitField,
   Partials,
+  AttachmentBuilder,
 } = require('discord.js');
 const { randomBytes } = require('node:crypto');
 
@@ -18,6 +19,7 @@ const { encryptString, decryptString, maskEmail, maskPhone } = require('./crypto
 const { isValidEmail, isValidPhone, normalizeEmail, normalizePhone, cleanTekkenTag, cleanName } = require('./validate');
 const { generateDoubleRoundRobinFixtures, computeStandings, getTodayISO, getLeaguePointRules, normalizePointRules } = require('./league');
 const { validateTournamentSetupInput, parseTimeSlotStarts } = require('./tournament-config');
+const { recalculateAndStorePowerRankings, getPowerRankings, generateSeedsFromPowerRankings, buildPowerRankingsTablePages, getPowerRankingsRenderHash } = require('./power-rankings');
 
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
 const MATCH_CHANNEL_ID = process.env.MATCH_CHANNEL_ID;
@@ -265,6 +267,10 @@ function updateGuildSetting(guildId, patch) {
       standings_channel_id = ?,
       dispute_channel_id = ?,
       activity_channel_id = ?,
+      power_rankings_channel_id = ?,
+      power_rankings_message_ids_json = ?,
+      power_rankings_last_hash = ?,
+      power_rankings_last_updated_at = ?,
       match_format = ?,
       allow_public_player_commands = ?,
       tournament_name = ?,
@@ -280,6 +286,10 @@ function updateGuildSetting(guildId, patch) {
     merged.standings_channel_id || null,
     merged.dispute_channel_id || null,
     merged.activity_channel_id || null,
+    merged.power_rankings_channel_id || null,
+    merged.power_rankings_message_ids_json || null,
+    merged.power_rankings_last_hash || null,
+    merged.power_rankings_last_updated_at || null,
     merged.match_format || 'FT3',
     merged.allow_public_player_commands ? 1 : 0,
     merged.tournament_name || 'Tekken League',
@@ -551,6 +561,102 @@ function buildMatchesMessage(limit = 30, discordUserId = null) {
     : `**Recent Matches (latest ${rows.length})**`;
 
   return `${title}\n${lines.join('\n')}`;
+}
+
+
+function csvEscape(value) {
+  if (value == null) return '';
+  const str = String(value);
+  if (/[,"\n]/.test(str)) {
+    return `"${str.replace(/"/g, '""')}"`;
+  }
+  return str;
+}
+
+function buildCountedMatchesCsv() {
+  const rows = db.prepare(`
+    SELECT
+      m.match_id,
+      m.fixture_id,
+      m.guild_id,
+      m.player_a_discord_id,
+      pa.tekken_tag AS player_a_tekken_tag,
+      m.player_b_discord_id,
+      pb.tekken_tag AS player_b_tekken_tag,
+      r.winner_discord_id,
+      pw.tekken_tag AS winner_tekken_tag,
+      r.score_a,
+      r.score_b,
+      r.is_forfeit,
+      r.reporter_discord_id,
+      r.confirmer_discord_id,
+      r.reported_at,
+      r.confirmed_at,
+      m.created_at,
+      m.ended_at,
+      f.leg_number
+    FROM matches m
+    JOIN fixtures f ON f.fixture_id = m.fixture_id
+    JOIN results r ON r.match_id = m.match_id
+    LEFT JOIN players pa ON pa.league_id = m.league_id AND pa.discord_user_id = m.player_a_discord_id
+    LEFT JOIN players pb ON pb.league_id = m.league_id AND pb.discord_user_id = m.player_b_discord_id
+    LEFT JOIN players pw ON pw.league_id = m.league_id AND pw.discord_user_id = r.winner_discord_id
+    WHERE m.league_id = 1
+      AND r.confirmed_at IS NOT NULL
+    ORDER BY r.confirmed_at ASC, m.match_id ASC
+  `).all();
+
+  const header = [
+    'match_id',
+    'fixture_id',
+    'leg_number',
+    'guild_id',
+    'player_a_discord_id',
+    'player_a_tekken_tag',
+    'player_b_discord_id',
+    'player_b_tekken_tag',
+    'winner_discord_id',
+    'winner_tekken_tag',
+    'score_a',
+    'score_b',
+    'is_forfeit',
+    'reporter_discord_id',
+    'confirmer_discord_id',
+    'match_created_at',
+    'match_ended_at',
+    'result_reported_at',
+    'result_confirmed_at',
+  ];
+
+  const lines = [header.join(',')];
+  for (const row of rows) {
+    lines.push([
+      row.match_id,
+      row.fixture_id,
+      row.leg_number,
+      row.guild_id,
+      row.player_a_discord_id,
+      row.player_a_tekken_tag,
+      row.player_b_discord_id,
+      row.player_b_tekken_tag,
+      row.winner_discord_id,
+      row.winner_tekken_tag,
+      row.score_a,
+      row.score_b,
+      row.is_forfeit,
+      row.reporter_discord_id,
+      row.confirmer_discord_id,
+      row.created_at,
+      row.ended_at,
+      row.reported_at,
+      row.confirmed_at,
+    ].map(csvEscape).join(','));
+  }
+
+  return {
+    rowCount: rows.length,
+    csv: `${lines.join('\n')}\n`,
+  };
 }
 
 function buildLeftToPlayMessage(discordUserId) {
@@ -1420,6 +1526,8 @@ client.on(Events.MessageReactionRemove, async (reaction, user) => {
 });
 
 let matchmakerTimer = null;
+let dailyPowerRefreshTimer = null;
+let lastPowerRefreshDay = '';
 
 async function runMatchmakingTick() {
   for (const guild of client.guilds.cache.values()) {
@@ -1436,6 +1544,87 @@ function invokeMatchmakingTickSafely() {
   }
   runMatchmakingTick().catch((err) => {
     console.error('Background matchmaking tick failed:', err);
+  });
+}
+
+async function refreshPowerRankingMessagesForGuild(guild, { force = false } = {}) {
+  if (!guild) return { updated: false, reason: 'no_guild' };
+
+  const rankings = recalculateAndStorePowerRankings(db, 1);
+  const pages = buildPowerRankingsTablePages(rankings, { pageSize: 20, includeTimestamp: true });
+  const renderHash = getPowerRankingsRenderHash(pages);
+
+  const settings = getGuildSettings(guild.id);
+  if (!force && settings.power_rankings_last_hash && settings.power_rankings_last_hash === renderHash) {
+    return { updated: false, reason: 'no_change', rankingsCount: rankings.length };
+  }
+
+  const preferredChannelId = settings.power_rankings_channel_id || settings.standings_channel_id || settings.results_channel_id || MATCH_CHANNEL_ID;
+  if (!preferredChannelId) return { updated: false, reason: 'no_channel', rankingsCount: rankings.length };
+
+  const channel = await guild.channels.fetch(preferredChannelId).catch(() => null);
+  if (!channel || !channel.isTextBased()) return { updated: false, reason: 'invalid_channel', rankingsCount: rankings.length };
+
+  let existingIds = [];
+  try {
+    existingIds = settings.power_rankings_message_ids_json ? JSON.parse(settings.power_rankings_message_ids_json) : [];
+    if (!Array.isArray(existingIds)) existingIds = [];
+  } catch {
+    existingIds = [];
+  }
+
+  const nextIds = [];
+  for (let i = 0; i < pages.length; i += 1) {
+    const content = pages[i];
+    const existingId = existingIds[i];
+    if (existingId) {
+      const msg = await channel.messages.fetch(existingId).catch(() => null);
+      if (msg) {
+        await msg.edit({ content }).catch(() => null);
+        nextIds.push(msg.id);
+        continue;
+      }
+    }
+    const sent = await channel.send({ content }).catch(() => null);
+    if (sent) nextIds.push(sent.id);
+  }
+
+  for (let i = pages.length; i < existingIds.length; i += 1) {
+    const extraId = existingIds[i];
+    const extra = await channel.messages.fetch(extraId).catch(() => null);
+    if (extra) await extra.delete().catch(() => null);
+  }
+
+  updateGuildSetting(guild.id, {
+    power_rankings_channel_id: preferredChannelId,
+    power_rankings_message_ids_json: JSON.stringify(nextIds),
+    power_rankings_last_hash: renderHash,
+    power_rankings_last_updated_at: new Date().toISOString(),
+  });
+
+  return { updated: true, reason: 'updated', rankingsCount: rankings.length, pageCount: pages.length };
+}
+
+async function refreshPowerRankingsForAllGuilds({ force = false } = {}) {
+  const outcomes = [];
+  for (const guild of client.guilds.cache.values()) {
+    // eslint-disable-next-line no-await-in-loop
+    const outcome = await refreshPowerRankingMessagesForGuild(guild, { force }).catch((err) => ({ updated: false, reason: `error:${err.message}` }));
+    outcomes.push({ guildId: guild.id, ...outcome });
+  }
+  return outcomes;
+}
+
+function getUtcDayKey() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function runDailyPowerRefreshTick() {
+  const day = getUtcDayKey();
+  if (lastPowerRefreshDay === day) return;
+  lastPowerRefreshDay = day;
+  refreshPowerRankingsForAllGuilds({ force: false }).catch((err) => {
+    console.error('Daily power rankings refresh failed:', err);
   });
 }
 
@@ -1456,6 +1645,15 @@ client.once(Events.ClientReady, () => {
 
   // Kick one immediate pass on startup.
   invokeMatchmakingTickSafely();
+
+  refreshPowerRankingsForAllGuilds({ force: false }).catch((err) => {
+    console.error('Initial power ranking refresh failed:', err);
+  });
+
+  runDailyPowerRefreshTick();
+  dailyPowerRefreshTimer = setInterval(() => {
+    runDailyPowerRefreshTick();
+  }, 60 * 60 * 1000);
 });
 
 async function handleInteractionCreate(interaction) {
@@ -1468,7 +1666,7 @@ async function handleInteractionCreate(interaction) {
 
     // Keep last seen name updated if signed up
     const displayName = getDisplayNameFromInteraction(interaction);
-    const existing = getPlayer(interaction.user.id);
+    const existing = getPlayer(interaction.user.id, { includeDisqualified: true });
     if (existing) upsertLastSeenDisplayName(interaction.user.id, displayName);
 
     if (interaction.isChatInputCommand()) {
@@ -1675,6 +1873,13 @@ async function handleInteractionCreate(interaction) {
         return;
       }
 
+      if (name === 'power_rankings') {
+        const rankings = recalculateAndStorePowerRankings(db, 1);
+        const pages = buildPowerRankingsTablePages(rankings, { pageSize: 20, includeTimestamp: true });
+        await interaction.reply({ content: pages[0], ephemeral: false });
+        return;
+      }
+
       if (name === 'table') {
         let pages;
         try {
@@ -1749,7 +1954,7 @@ ${lines.join('\n')}`, ephemeral: false });
             '• /standings or /table — view live standings table anytime',
             '• /matches — view recent match IDs and statuses',
             '• /mydata — view your private stored profile details',
-            'Admins: /adminhelp, /points, /admin_vs, /bot_settings, /admin_status, /admin_player_matches, /admin_player_left, /admin_tournament_settings, /admin_setup_tournament, /admin_generate_fixtures, /admin_force_result, /admin_void_match, /admin_dispute_match, /admin_dq_player, /admin_rename_player, /admin_allowance_player, /admin_reset, /admin_reset_confirm, /admin_reset_league',
+            'Admins: /adminhelp, /points, /admin_vs, /bot_settings, /admin_status, /admin_player_matches, /admin_player_left, /admin_export_counted_matches, /admin_refresh_power_rankings, /admin_generate_power_seeds, /admin_tournament_settings, /admin_setup_tournament, /admin_generate_fixtures, /admin_force_result, /admin_void_match, /admin_dispute_match, /admin_dq_player, /admin_rename_player, /admin_allowance_player, /admin_reset, /admin_reset_confirm, /admin_reset_league',
           ].join('\n'),
         });
         return;
@@ -1786,6 +1991,9 @@ ${lines.join('\n')}`, ephemeral: false });
             '• /admin_generate_fixtures — generate missing round-robin fixtures.',
             '• /admin_player_matches — inspect one player match list.',
             '• /admin_player_left — inspect one player remaining opponents.',
+            '• /admin_export_counted_matches — export table-counted non-voided matches as CSV.',
+            '• /admin_refresh_power_rankings — recalc and refresh persistent power ranking table.',
+            '• /admin_generate_power_seeds — generate seeds with DQ restrictions applied.',
             '• /admin_tournament_settings — view current tournament setup + points.',
             '• /admin_setup_tournament — update setup fields (days, slots, show%).',
             '• /points — set points for win, loss, no-show, and 3-0 sweep bonus.',
@@ -1947,6 +2155,7 @@ ${lines.join('\n')}`, ephemeral: false });
         if (sub === 'set_standings_channel') patch.standings_channel_id = interaction.options.getChannel('channel', true).id;
         if (sub === 'set_dispute_channel') patch.dispute_channel_id = interaction.options.getChannel('channel', true).id;
         if (sub === 'set_activity_channel') patch.activity_channel_id = interaction.options.getChannel('channel', true).id;
+        if (sub === 'set_power_rankings_channel') patch.power_rankings_channel_id = interaction.options.getChannel('channel', true).id;
         if (sub === 'set_diagnostics') patch.enable_diagnostics = interaction.options.getBoolean('enabled', true) ? 1 : 0;
         if (sub === 'set_allow_public_player_commands') patch.allow_public_player_commands = interaction.options.getBoolean('enabled', true) ? 1 : 0;
         if (sub === 'set_cleanup_policy') {
@@ -2041,6 +2250,61 @@ ${lines.join('\n')}`, ephemeral: false });
         }
 
         await interaction.reply({ content: buildLeftToPlayMessage(target.id), ephemeral: true });
+        return;
+      }
+
+      if (name === 'admin_export_counted_matches') {
+        if (!isAdmin(interaction)) {
+          await interaction.reply({ content: 'Admin only.', ephemeral: true });
+          return;
+        }
+
+        const { rowCount, csv } = buildCountedMatchesCsv();
+        const timestamp = new Date().toISOString().replace(/[.:]/g, '-');
+        const fileName = `counted-matches-${timestamp}.csv`;
+
+        const attachment = new AttachmentBuilder(Buffer.from(csv, 'utf8'), { name: fileName });
+
+        await interaction.reply({
+          content: `Exported ${rowCount} table-counted match(es) (voided matches excluded).`,
+          files: [attachment],
+          ephemeral: true,
+        });
+        return;
+      }
+
+
+
+      if (name === 'admin_refresh_power_rankings') {
+        if (!isAdmin(interaction)) {
+          await interaction.reply({ content: 'Admin only.', ephemeral: true });
+          return;
+        }
+
+        const outcome = await refreshPowerRankingMessagesForGuild(interaction.guild, { force: true });
+        await interaction.reply({
+          content: `Power rankings refresh complete. Updated=${outcome.updated ? 'yes' : 'no'} reason=${outcome.reason} players=${outcome.rankingsCount || 0}.`,
+          ephemeral: true,
+        });
+        return;
+      }
+
+      if (name === 'admin_generate_power_seeds') {
+        if (!isAdmin(interaction)) {
+          await interaction.reply({ content: 'Admin only.', ephemeral: true });
+          return;
+        }
+
+        const entrants = interaction.options.getInteger('entrants');
+        const rankings = recalculateAndStorePowerRankings(db, 1);
+        const seeds = generateSeedsFromPowerRankings(rankings, entrants || null);
+        if (!seeds.length) {
+          await interaction.reply({ content: 'No players available to seed.', ephemeral: true });
+          return;
+        }
+
+        const lines = seeds.map((s, idx) => `${idx + 1}. ${s.tekken_tag || s.discord_user_id}${s.seeding_asterisk ? '*' : ''} (<@${s.discord_user_id}>) | rating=${Number(s.power_player_rating || 0).toFixed(1)} | dq=${s.dq_count} | rule=${s.seeding_restriction}`);
+        await interaction.reply({ content: `**Power Seeds (${seeds.length})**\n${lines.join('\n')}`, ephemeral: true });
         return;
       }
 
@@ -2407,7 +2671,7 @@ ${buildTournamentSettingsMessage()}`,
         }
 
         const tx = db.transaction(() => {
-          db.prepare("UPDATE players SET status = 'disqualified' WHERE league_id = 1 AND discord_user_id = ?").run(target.id);
+          db.prepare("UPDATE players SET status = 'disqualified', dq_count = COALESCE(dq_count, 0) + 1 WHERE league_id = 1 AND discord_user_id = ?").run(target.id);
           db.prepare('DELETE FROM attendance WHERE league_id = 1 AND discord_user_id = ?').run(target.id);
           db.prepare('DELETE FROM ready_queue WHERE league_id = 1 AND discord_user_id = ?').run(target.id);
           db.prepare("UPDATE matches SET state = 'cancelled', ended_at = datetime('now') WHERE league_id = 1 AND (player_a_discord_id = ? OR player_b_discord_id = ?) AND state IN ('pending','reported','active','disputed')").run(target.id, target.id);
@@ -2461,7 +2725,7 @@ ${buildTournamentSettingsMessage()}`,
 
         const displayName = getDisplayNameFromInteraction(interaction);
 
-        const existing = getPlayer(interaction.user.id);
+        const existing = getPlayer(interaction.user.id, { includeDisqualified: true });
         const isNewSignup = !existing;
         if (isNewSignup) {
           db.prepare(`
@@ -2553,6 +2817,7 @@ function shutdown(signal) {
   console.log(`${signal} received, shutting down gracefully...`);
   try {
     if (matchmakerTimer) clearInterval(matchmakerTimer);
+    if (dailyPowerRefreshTimer) clearInterval(dailyPowerRefreshTimer);
     db.close();
   } catch (err) {
     console.error('Failed to close database cleanly:', err);
