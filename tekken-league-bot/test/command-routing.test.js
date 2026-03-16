@@ -14,7 +14,7 @@ function extractDeployCommandNames(text) {
         'admin_export_counted_matches', 'admin_refresh_power_rankings', 'admin_generate_power_seeds',
         'admin_setup_tournament', 'points', 'admin_vs', 'admin_tournament_settings',
         'admin_reset', 'admin_reset_confirm', 'admin_reset_league', 'admin_force_result',
-        'admin_dispute_match', 'admin_void_match', 'admin_dq_player', 'admin_rename_player', 'admin_allowance_player',
+        'admin_dispute_match', 'admin_void_match', 'admin_dq_player', 'admin_dq_remain', 'admin_rename_player', 'admin_allowance_player',
       ].includes(name);
     });
 }

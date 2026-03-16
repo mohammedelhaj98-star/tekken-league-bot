@@ -135,7 +135,7 @@ function computeStandings(db, league_id = 1) {
   const players = db.prepare(`
     SELECT discord_user_id, tekken_tag, discord_display_name_last_seen, status
     FROM players
-    WHERE league_id = ? AND status IN ('active', 'disqualified')
+    WHERE league_id = ? AND status IN ('active', 'disqualified', 'disqualified_remaining')
   `).all(league_id);
 
   const rows = new Map();
