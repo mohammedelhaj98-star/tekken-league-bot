@@ -9,8 +9,9 @@ function extractDeployCommandNames(text) {
     .filter((name) => {
       return [
         'ping', 'help', 'helpplayer', 'playerhelp', 'adminhelp', 'signup', 'mydata', 'checkin',
-        'ready', 'unready', 'standings', 'table', 'queue', 'left', 'matches', 'bot_settings',
+        'ready', 'unready', 'standings', 'power_rankings', 'table', 'queue', 'left', 'matches', 'bot_settings',
         'admin_generate_fixtures', 'admin_status', 'admin_player_matches', 'admin_player_left',
+        'admin_export_counted_matches', 'admin_refresh_power_rankings', 'admin_generate_power_seeds',
         'admin_setup_tournament', 'points', 'admin_vs', 'admin_tournament_settings',
         'admin_reset', 'admin_reset_confirm', 'admin_reset_league', 'admin_force_result',
         'admin_dispute_match', 'admin_void_match', 'admin_dq_player', 'admin_rename_player', 'admin_allowance_player',
