@@ -389,6 +389,20 @@ const commands = [
       .setMaxLength(200))
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 
+  new SlashCommandBuilder()
+    .setName('admin_dq_remain')
+    .setDescription('Admin: disqualify a player for remaining fixtures only (auto 0-3 forfeits)')
+    .addUserOption(o => o
+      .setName('player')
+      .setDescription('Player to disqualify for remaining fixtures')
+      .setRequired(true))
+    .addStringOption(o => o
+      .setName('reason')
+      .setDescription('Reason for disqualification')
+      .setRequired(false)
+      .setMaxLength(200))
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
 ];
 
 const names = commands.map(c => c.toJSON().name);
