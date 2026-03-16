@@ -57,6 +57,10 @@ const commands = [
     .setDescription('Show current league standings'),
 
   new SlashCommandBuilder()
+    .setName('power_rankings')
+    .setDescription('Show Power Player Rankings used for long-term seeding'),
+
+  new SlashCommandBuilder()
     .setName('table')
     .setDescription('Show detailed standings table (optionally choose a page)')
     .addIntegerOption(o => o
@@ -120,6 +124,10 @@ const commands = [
       .setDescription('Set channel for signup/checkin/ready activity notifications')
       .addChannelOption(o => o.setName('channel').setDescription('Activity channel').setRequired(true)))
     .addSubcommand(sc => sc
+      .setName('set_power_rankings_channel')
+      .setDescription('Set channel for the persistent Power Rankings table')
+      .addChannelOption(o => o.setName('channel').setDescription('Power rankings channel').setRequired(true)))
+    .addSubcommand(sc => sc
       .setName('set_cleanup_policy')
       .setDescription('Set message cleanup policy')
       .addStringOption(o => o.setName('policy').setDescription('Policy').setRequired(true).addChoices(
@@ -179,6 +187,22 @@ const commands = [
   new SlashCommandBuilder()
     .setName('admin_export_counted_matches')
     .setDescription('Admin: export all table-counted (non-voided) matches as CSV')
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
+  new SlashCommandBuilder()
+    .setName('admin_refresh_power_rankings')
+    .setDescription('Admin: force recalculation and refresh persistent Power Rankings table')
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
+  new SlashCommandBuilder()
+    .setName('admin_generate_power_seeds')
+    .setDescription('Admin: generate seeding order from Power Player Rankings with DQ rules')
+    .addIntegerOption(o => o
+      .setName('entrants')
+      .setDescription('Optional entrant cap (top N by power rating)')
+      .setRequired(false)
+      .setMinValue(2)
+      .setMaxValue(1024))
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 
   new SlashCommandBuilder()
