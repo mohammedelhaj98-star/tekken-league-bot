@@ -49,6 +49,18 @@ function initDb(db) {
       phone_enc TEXT NOT NULL,
       status TEXT NOT NULL DEFAULT 'active',
       allowance_bonus_days INTEGER NOT NULL DEFAULT 0,
+      dq_count INTEGER NOT NULL DEFAULT 0,
+      ranked_tier_score REAL NOT NULL DEFAULT 50,
+      ranked_recent_win_rate REAL NOT NULL DEFAULT 50,
+      ranked_recent_matches INTEGER NOT NULL DEFAULT 0,
+      ranked_recent_activity REAL NOT NULL DEFAULT 0,
+      league_strength_score REAL NOT NULL DEFAULT 50,
+      ranked_strength_score REAL NOT NULL DEFAULT 50,
+      activity_momentum_score REAL NOT NULL DEFAULT 0,
+      reliability_index_score REAL NOT NULL DEFAULT 100,
+      power_player_rating REAL NOT NULL DEFAULT 50,
+      seeding_restriction TEXT NOT NULL DEFAULT 'none',
+      seeding_asterisk INTEGER NOT NULL DEFAULT 0,
       signup_at TEXT NOT NULL DEFAULT (datetime('now')),
       FOREIGN KEY (league_id) REFERENCES leagues(league_id)
     );
@@ -181,6 +193,10 @@ function initDb(db) {
       standings_channel_id TEXT,
       dispute_channel_id TEXT,
       activity_channel_id TEXT,
+      power_rankings_channel_id TEXT,
+      power_rankings_message_ids_json TEXT,
+      power_rankings_last_hash TEXT,
+      power_rankings_last_updated_at TEXT,
       match_format TEXT NOT NULL DEFAULT 'FT3',
       allow_public_player_commands INTEGER NOT NULL DEFAULT 1,
       tournament_name TEXT NOT NULL DEFAULT 'Tekken League',
@@ -242,6 +258,22 @@ function initDb(db) {
   ensureColumn('guild_settings', 'dispute_channel_id', 'dispute_channel_id TEXT');
   ensureColumn('guild_settings', 'activity_channel_id', 'activity_channel_id TEXT');
   ensureColumn('players', 'allowance_bonus_days', 'allowance_bonus_days INTEGER NOT NULL DEFAULT 0');
+  ensureColumn('players', 'dq_count', 'dq_count INTEGER NOT NULL DEFAULT 0');
+  ensureColumn('players', 'ranked_tier_score', 'ranked_tier_score REAL NOT NULL DEFAULT 50');
+  ensureColumn('players', 'ranked_recent_win_rate', 'ranked_recent_win_rate REAL NOT NULL DEFAULT 50');
+  ensureColumn('players', 'ranked_recent_matches', 'ranked_recent_matches INTEGER NOT NULL DEFAULT 0');
+  ensureColumn('players', 'ranked_recent_activity', 'ranked_recent_activity REAL NOT NULL DEFAULT 0');
+  ensureColumn('players', 'league_strength_score', 'league_strength_score REAL NOT NULL DEFAULT 50');
+  ensureColumn('players', 'ranked_strength_score', 'ranked_strength_score REAL NOT NULL DEFAULT 50');
+  ensureColumn('players', 'activity_momentum_score', 'activity_momentum_score REAL NOT NULL DEFAULT 0');
+  ensureColumn('players', 'reliability_index_score', 'reliability_index_score REAL NOT NULL DEFAULT 100');
+  ensureColumn('players', 'power_player_rating', 'power_player_rating REAL NOT NULL DEFAULT 50');
+  ensureColumn('players', 'seeding_restriction', "seeding_restriction TEXT NOT NULL DEFAULT 'none'");
+  ensureColumn('players', 'seeding_asterisk', 'seeding_asterisk INTEGER NOT NULL DEFAULT 0');
+  ensureColumn('guild_settings', 'power_rankings_channel_id', 'power_rankings_channel_id TEXT');
+  ensureColumn('guild_settings', 'power_rankings_message_ids_json', 'power_rankings_message_ids_json TEXT');
+  ensureColumn('guild_settings', 'power_rankings_last_hash', 'power_rankings_last_hash TEXT');
+  ensureColumn('guild_settings', 'power_rankings_last_updated_at', 'power_rankings_last_updated_at TEXT');
 
 
   const createIndexStatements = [
