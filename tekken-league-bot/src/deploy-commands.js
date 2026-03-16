@@ -173,7 +173,12 @@ const commands = [
     .addUserOption(o => o
       .setName('player')
       .setDescription('Player to inspect')
-      .setRequired(true))
+    .setRequired(true))
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
+  new SlashCommandBuilder()
+    .setName('admin_export_counted_matches')
+    .setDescription('Admin: export all table-counted (non-voided) matches as CSV')
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 
   new SlashCommandBuilder()

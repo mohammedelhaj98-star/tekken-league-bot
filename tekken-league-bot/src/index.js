@@ -10,6 +10,7 @@ const {
   ActionRowBuilder,
   PermissionsBitField,
   Partials,
+  AttachmentBuilder,
 } = require('discord.js');
 const { randomBytes } = require('node:crypto');
 
@@ -555,6 +556,102 @@ function buildMatchesMessage(limit = 30, discordUserId = null) {
     : `**Recent Matches (latest ${rows.length})**`;
 
   return `${title}\n${lines.join('\n')}`;
+}
+
+
+function csvEscape(value) {
+  if (value == null) return '';
+  const str = String(value);
+  if (/[,"\n]/.test(str)) {
+    return `"${str.replace(/"/g, '""')}"`;
+  }
+  return str;
+}
+
+function buildCountedMatchesCsv() {
+  const rows = db.prepare(`
+    SELECT
+      m.match_id,
+      m.fixture_id,
+      m.guild_id,
+      m.player_a_discord_id,
+      pa.tekken_tag AS player_a_tekken_tag,
+      m.player_b_discord_id,
+      pb.tekken_tag AS player_b_tekken_tag,
+      r.winner_discord_id,
+      pw.tekken_tag AS winner_tekken_tag,
+      r.score_a,
+      r.score_b,
+      r.is_forfeit,
+      r.reporter_discord_id,
+      r.confirmer_discord_id,
+      r.reported_at,
+      r.confirmed_at,
+      m.created_at,
+      m.ended_at,
+      f.leg_number
+    FROM matches m
+    JOIN fixtures f ON f.fixture_id = m.fixture_id
+    JOIN results r ON r.match_id = m.match_id
+    LEFT JOIN players pa ON pa.league_id = m.league_id AND pa.discord_user_id = m.player_a_discord_id
+    LEFT JOIN players pb ON pb.league_id = m.league_id AND pb.discord_user_id = m.player_b_discord_id
+    LEFT JOIN players pw ON pw.league_id = m.league_id AND pw.discord_user_id = r.winner_discord_id
+    WHERE m.league_id = 1
+      AND r.confirmed_at IS NOT NULL
+    ORDER BY r.confirmed_at ASC, m.match_id ASC
+  `).all();
+
+  const header = [
+    'match_id',
+    'fixture_id',
+    'leg_number',
+    'guild_id',
+    'player_a_discord_id',
+    'player_a_tekken_tag',
+    'player_b_discord_id',
+    'player_b_tekken_tag',
+    'winner_discord_id',
+    'winner_tekken_tag',
+    'score_a',
+    'score_b',
+    'is_forfeit',
+    'reporter_discord_id',
+    'confirmer_discord_id',
+    'match_created_at',
+    'match_ended_at',
+    'result_reported_at',
+    'result_confirmed_at',
+  ];
+
+  const lines = [header.join(',')];
+  for (const row of rows) {
+    lines.push([
+      row.match_id,
+      row.fixture_id,
+      row.leg_number,
+      row.guild_id,
+      row.player_a_discord_id,
+      row.player_a_tekken_tag,
+      row.player_b_discord_id,
+      row.player_b_tekken_tag,
+      row.winner_discord_id,
+      row.winner_tekken_tag,
+      row.score_a,
+      row.score_b,
+      row.is_forfeit,
+      row.reporter_discord_id,
+      row.confirmer_discord_id,
+      row.created_at,
+      row.ended_at,
+      row.reported_at,
+      row.confirmed_at,
+    ].map(csvEscape).join(','));
+  }
+
+  return {
+    rowCount: rows.length,
+    csv: `${lines.join('\n')}\n`,
+  };
 }
 
 function buildLeftToPlayMessage(discordUserId) {
@@ -1472,7 +1569,7 @@ async function handleInteractionCreate(interaction) {
 
     // Keep last seen name updated if signed up
     const displayName = getDisplayNameFromInteraction(interaction);
-    const existing = getPlayer(interaction.user.id);
+    const existing = getPlayer(interaction.user.id, { includeDisqualified: true });
     if (existing) upsertLastSeenDisplayName(interaction.user.id, displayName);
 
     if (interaction.isChatInputCommand()) {
@@ -1753,7 +1850,7 @@ ${lines.join('\n')}`, ephemeral: false });
             '• /standings or /table — view live standings table anytime',
             '• /matches — view recent match IDs and statuses',
             '• /mydata — view your private stored profile details',
-            'Admins: /adminhelp, /points, /admin_vs, /bot_settings, /admin_status, /admin_player_matches, /admin_player_left, /admin_tournament_settings, /admin_setup_tournament, /admin_generate_fixtures, /admin_force_result, /admin_void_match, /admin_dispute_match, /admin_dq_player, /admin_dq_remain, /admin_rename_player, /admin_allowance_player, /admin_reset, /admin_reset_confirm, /admin_reset_league',
+            'Admins: /adminhelp, /points, /admin_vs, /bot_settings, /admin_status, /admin_player_matches, /admin_player_left, /admin_export_counted_matches, /admin_tournament_settings, /admin_setup_tournament, /admin_generate_fixtures, /admin_force_result, /admin_void_match, /admin_dispute_match, /admin_dq_player, /admin_rename_player, /admin_allowance_player, /admin_reset, /admin_reset_confirm, /admin_reset_league',
           ].join('\n'),
         });
         return;
@@ -1790,6 +1887,7 @@ ${lines.join('\n')}`, ephemeral: false });
             '• /admin_generate_fixtures — generate missing round-robin fixtures.',
             '• /admin_player_matches — inspect one player match list.',
             '• /admin_player_left — inspect one player remaining opponents.',
+            '• /admin_export_counted_matches — export table-counted non-voided matches as CSV.',
             '• /admin_tournament_settings — view current tournament setup + points.',
             '• /admin_setup_tournament — update setup fields (days, slots, show%).',
             '• /points — set points for win, loss, no-show, and 3-0 sweep bonus.',
@@ -2048,6 +2146,27 @@ ${lines.join('\n')}`, ephemeral: false });
         await interaction.reply({ content: buildLeftToPlayMessage(target.id), ephemeral: true });
         return;
       }
+
+      if (name === 'admin_export_counted_matches') {
+        if (!isAdmin(interaction)) {
+          await interaction.reply({ content: 'Admin only.', ephemeral: true });
+          return;
+        }
+
+        const { rowCount, csv } = buildCountedMatchesCsv();
+        const timestamp = new Date().toISOString().replace(/[.:]/g, '-');
+        const fileName = `counted-matches-${timestamp}.csv`;
+
+        const attachment = new AttachmentBuilder(Buffer.from(csv, 'utf8'), { name: fileName });
+
+        await interaction.reply({
+          content: `Exported ${rowCount} table-counted match(es) (voided matches excluded).`,
+          files: [attachment],
+          ephemeral: true,
+        });
+        return;
+      }
+
 
       if (name === 'admin_rename_player') {
         if (!isAdmin(interaction)) {
@@ -2564,7 +2683,7 @@ Remaining fixtures auto-forfeited 0-3: ${fixturesForfeited}`,
 
         const displayName = getDisplayNameFromInteraction(interaction);
 
-        const existing = getPlayer(interaction.user.id);
+        const existing = getPlayer(interaction.user.id, { includeDisqualified: true });
         const isNewSignup = !existing;
         if (isNewSignup) {
           db.prepare(`
