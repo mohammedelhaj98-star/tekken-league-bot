@@ -67,6 +67,14 @@ function validateTournamentSetupInput(input) {
     out.timeslot_duration_minutes = input.timeslotDurationMinutes;
   }
 
+
+  if (input.autoUnreadyMinutes !== undefined && input.autoUnreadyMinutes !== null) {
+    if (!Number.isInteger(input.autoUnreadyMinutes) || input.autoUnreadyMinutes < 1 || input.autoUnreadyMinutes > 1440) {
+      return { ok: false, error: 'Auto-unready minutes must be an integer between 1 and 1440.' };
+    }
+    out.auto_unready_minutes = input.autoUnreadyMinutes;
+  }
+
   if (input.totalTournamentDays !== undefined && input.totalTournamentDays !== null) {
     if (!Number.isInteger(input.totalTournamentDays) || input.totalTournamentDays < 1 || input.totalTournamentDays > 365) {
       return { ok: false, error: 'Total tournament days must be an integer between 1 and 365.' };

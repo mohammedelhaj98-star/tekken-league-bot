@@ -19,6 +19,7 @@ test('validateTournamentSetupInput maps percent and validates counts', () => {
     maxPlayers: 64,
     timeslotCount: 2,
     timeslotDurationMinutes: 90,
+    autoUnreadyMinutes: 20,
     timeSlotStartsRaw: '18:00,20:00',
     totalTournamentDays: 20,
     minimumShowupPercent: 75,
@@ -49,4 +50,14 @@ test('validateTournamentSetupInput supports clearing timeslots and setting start
   assert.equal(ok.ok, true);
   assert.equal(ok.values.timeslot_starts, '');
   assert.equal(ok.values.tournament_start_date, '2026-03-01');
+});
+
+
+test('validateTournamentSetupInput validates auto-unready minutes range', () => {
+  const ok = validateTournamentSetupInput({ autoUnreadyMinutes: 25 });
+  assert.equal(ok.ok, true);
+  assert.equal(ok.values.auto_unready_minutes, 25);
+
+  const bad = validateTournamentSetupInput({ autoUnreadyMinutes: 0 });
+  assert.equal(bad.ok, false);
 });

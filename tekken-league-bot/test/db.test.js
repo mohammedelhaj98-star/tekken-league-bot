@@ -64,11 +64,23 @@ test('initDb adds configurable points columns and admin override control columns
   assert.equal(leagueCols.includes('points_no_show'), true);
   assert.equal(leagueCols.includes('points_sweep_bonus'), true);
   assert.equal(leagueCols.includes('tournament_start_date'), true);
+  assert.equal(leagueCols.includes('auto_unready_minutes'), true);
 
   const overrideCols = db.prepare("PRAGMA table_info(admin_match_overrides)").all().map((c) => c.name);
   assert.equal(overrideCols.includes('score_code'), true);
   assert.equal(overrideCols.includes('active'), true);
   assert.equal(overrideCols.includes('winner_selected'), true);
+
+  db.close();
+});
+
+
+test('initDb adds player allowance bonus column', () => {
+  const db = new Database(':memory:');
+  initDb(db);
+
+  const playerCols = db.prepare("PRAGMA table_info(players)").all().map((c) => c.name);
+  assert.equal(playerCols.includes('allowance_bonus_days'), true);
 
   db.close();
 });

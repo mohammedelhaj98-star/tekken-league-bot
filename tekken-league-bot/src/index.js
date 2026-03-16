@@ -194,9 +194,15 @@ function upsertLastSeenDisplayName(discord_user_id, displayName) {
   `).run(displayName, discord_user_id);
 }
 
-function getPlayer(discord_user_id) {
+function getPlayer(discord_user_id, { includeDisqualified = false } = {}) {
+  if (includeDisqualified) {
+    return db.prepare(`
+      SELECT * FROM players WHERE league_id = 1 AND discord_user_id = ? AND status IN ('active', 'disqualified', 'disqualified_remaining')
+    `).get(discord_user_id);
+  }
+
   return db.prepare(`
-    SELECT * FROM players WHERE league_id = 1 AND discord_user_id = ? AND status IN ('active', 'disqualified')
+    SELECT * FROM players WHERE league_id = 1 AND discord_user_id = ? AND status = 'active'
   `).get(discord_user_id);
 }
 
@@ -205,11 +211,33 @@ function ensureSignedUp(interaction) {
   return p;
 }
 
+function isDisqualifiedStatus(status) {
+  return status === 'disqualified' || status === 'disqualified_remaining';
+}
+
 function logAudit(actionType, actorDiscordId, payload = null) {
   db.prepare(`
     INSERT INTO audit_log (league_id, actor_discord_id, action_type, payload_json)
     VALUES (1, ?, ?, ?)
   `).run(actorDiscordId || null, actionType, payload ? JSON.stringify(payload) : null);
+}
+
+function isUnknownInteractionError(err) {
+  if (!err) return false;
+  if (Number(err.code) === 10062) return true;
+  return /unknown interaction/i.test(String(err.message || ''));
+}
+
+async function safeInteractionReply(interaction, payload) {
+  try {
+    if (interaction.deferred || interaction.replied) {
+      return await interaction.followUp(payload);
+    }
+    return await interaction.reply(payload);
+  } catch (err) {
+    if (isUnknownInteractionError(err)) return null;
+    throw err;
+  }
 }
 
 
@@ -320,6 +348,13 @@ function daysBetweenInclusive(startDateIso, endDateIso) {
   const diffMs = end.getTime() - start.getTime();
   const days = Math.floor(diffMs / (24 * 60 * 60 * 1000)) + 1;
   return Math.max(1, days);
+}
+
+function getElapsedAttendanceDays(startDateIso, todayIso, seasonDays) {
+  const totalDays = Math.max(1, Number(seasonDays || 1));
+  const inclusive = daysBetweenInclusive(startDateIso, todayIso);
+  // Count only fully elapsed tournament days (today should not reduce allowance yet).
+  return Math.max(0, Math.min(totalDays, inclusive - 1));
 }
 
 function getQatarNowParts(now = new Date()) {
@@ -452,6 +487,23 @@ function getReadyQueueSnapshot() {
   `).all();
 }
 
+function getReadyWindowMinutes(leagueRow = null) {
+  const league = leagueRow || db.prepare('SELECT auto_unready_minutes FROM leagues WHERE league_id = 1').get() || {};
+  const minutes = Number(league.auto_unready_minutes || 20);
+  if (!Number.isFinite(minutes)) return 120;
+  return Math.max(1, Math.min(1440, Math.trunc(minutes)));
+}
+
+function purgeExpiredReadyQueueEntries(leagueRow = null) {
+  const windowMinutes = getReadyWindowMinutes(leagueRow);
+  const result = db.prepare(`
+    DELETE FROM ready_queue
+    WHERE league_id = 1
+      AND ((julianday('now') - julianday(since_ts)) * 24 * 60) >= ?
+  `).run(windowMinutes);
+  return Number(result?.changes || 0);
+}
+
 
 function buildMatchesMessage(limit = 30, discordUserId = null) {
   const rows = discordUserId
@@ -520,6 +572,7 @@ function buildLeftToPlayMessage(discordUserId) {
     FROM fixtures f
     LEFT JOIN players p
       ON p.league_id = f.league_id
+      AND p.status = 'active'
       AND p.discord_user_id = CASE
         WHEN f.player_a_discord_id = ? THEN f.player_b_discord_id
         ELSE f.player_a_discord_id
@@ -527,6 +580,7 @@ function buildLeftToPlayMessage(discordUserId) {
     WHERE f.league_id = 1
       AND (f.player_a_discord_id = ? OR f.player_b_discord_id = ?)
       AND f.status IN ('unplayed', 'locked_in_match')
+      AND p.discord_user_id IS NOT NULL
     GROUP BY opponent_id, opponent_tag
   `).all(discordUserId, discordUserId, discordUserId, discordUserId);
 
@@ -561,7 +615,7 @@ function buildStandingsListMessage() {
   const standings = computeStandings(db, 1);
   if (!standings.length) return '**Standings**\nNo active players yet. Use /signup to join the league.';
 
-  const lines = standings.map((s, idx) => `${idx + 1}. ${s.tekken_tag}${s.status === 'disqualified' ? ' (DQ)' : ''}`);
+  const lines = standings.map((s, idx) => `${idx + 1}. ${s.tekken_tag}${isDisqualifiedStatus(s.status) ? ' (DQ)' : ''}`);
   return `**Standings**\n${lines.join('\n')}`;
 }
 
@@ -573,8 +627,7 @@ function buildStandingsTablePages() {
   const seasonDays = Math.max(1, Number(league.season_days || 20));
   const startDate = String(league.tournament_start_date || getTodayISO(true));
   const today = getTodayISO(true);
-  const elapsedDays = Math.max(1, daysBetweenInclusive(startDate, today));
-  const tournamentDaysElapsed = Math.min(seasonDays, elapsedDays);
+  const tournamentDaysElapsed = getElapsedAttendanceDays(startDate, today, seasonDays);
   const missedAllowance = 5;
   const minCheckinsRequired = Math.max(0, tournamentDaysElapsed - missedAllowance);
   const activePlayerCount = db.prepare(`
@@ -602,6 +655,12 @@ function buildStandingsTablePages() {
     GROUP BY discord_user_id
   `).all();
   const attendanceById = new Map(attendanceRows.map((r) => [r.discord_user_id, Number(r.checkin_days || 0)]));
+  const allowanceBonusRows = db.prepare(`
+    SELECT discord_user_id, allowance_bonus_days
+    FROM players
+    WHERE league_id = 1
+  `).all();
+  const allowanceBonusById = new Map(allowanceBonusRows.map((r) => [r.discord_user_id, Number(r.allowance_bonus_days || 0)]));
   const formatCell = (value, maxLen = 32) => {
     const text = String(value ?? '');
     if (text.length <= maxLen) return text;
@@ -612,17 +671,20 @@ function buildStandingsTablePages() {
   const rows = standings.map((s, idx) => {
     const checkins = attendanceById.get(s.discord_user_id) || 0;
     const missedDays = Math.max(0, tournamentDaysElapsed - checkins);
-    const showPct = Math.max(0, Math.min(100, Math.round(((tournamentDaysElapsed - missedDays) / tournamentDaysElapsed) * 100)));
+    const showPct = tournamentDaysElapsed === 0
+      ? 100
+      : Math.max(0, Math.min(100, Math.round(((tournamentDaysElapsed - missedDays) / tournamentDaysElapsed) * 100)));
     const completed = completedByPlayer.get(s.discord_user_id) || 0;
     const finishedMatches = requiredFixturesPerPlayer > 0 && completed >= requiredFixturesPerPlayer;
-    const allowanceRemaining = Math.max(0, missedAllowance - missedDays);
-    const allowanceText = s.status === 'disqualified'
+    const allowanceBonus = Math.max(0, allowanceBonusById.get(s.discord_user_id) || 0);
+    const allowanceRemaining = Math.max(0, (missedAllowance + allowanceBonus) - missedDays);
+    const allowanceText = isDisqualifiedStatus(s.status)
       ? '0'
       : (finishedMatches ? `EXEMPT (${allowanceRemaining})` : `${allowanceRemaining}`);
 
     return {
       rank: String(idx + 1),
-      player: formatCell(`${s.tekken_tag}${s.status === 'disqualified' ? ' (DQ)' : ''}`, 24),
+      player: formatCell(`${s.tekken_tag}${isDisqualifiedStatus(s.status) ? ' (DQ)' : ''}`, 24),
       pts: String(s.points),
       gp: String(s.played),
       w: String(s.wins),
@@ -654,7 +716,7 @@ function buildStandingsTablePages() {
 
   const legend = [
     'Legend: #=Rank | PLAYER=Tag | PTS=Points | GP=Games played | W/L=Wins/Losses | DIFF=Game diff | GW=Games won | SHOW%=Attendance | ALLOW=Missed check-ins left',
-    `Attendance starts at 100% and decreases by missed days since start (${startDate}). Check-in allowance left is shown as a number (max ${missedAllowance}).`,
+    `Attendance starts at 100% and decreases by missed fully elapsed days since start (${startDate}). Check-in allowance left is shown as a number (base max ${missedAllowance} + player bonus).`,
     `Elapsed days: ${tournamentDaysElapsed}/${seasonDays}. Minimum check-ins now: ${minCheckinsRequired}. Finished all fixtures early => EXEMPT.`,
     '',
   ].join('\n');
@@ -703,6 +765,7 @@ function getLeagueSettings() {
       max_players,
       timeslot_count,
       timeslot_duration_minutes,
+      auto_unready_minutes,
       timeslot_starts
     FROM leagues
     WHERE league_id = 1
@@ -720,7 +783,7 @@ function buildTournamentSettingsMessage() {
   const dropPerDay = (s.season_days || 0) > 0 ? (100 / s.season_days).toFixed(2) : '0.00';
   const startDate = String(s.tournament_start_date || getTodayISO(true));
   const today = getTodayISO(true);
-  const elapsedDays = Math.max(1, Math.min(s.season_days || 0, daysBetweenInclusive(startDate, today)));
+  const elapsedDays = getElapsedAttendanceDays(startDate, today, s.season_days || 0);
   const points = getLeaguePointRules(db, 1);
 
   return [
@@ -730,10 +793,11 @@ function buildTournamentSettingsMessage() {
     `No. of Players (max): ${s.max_players}`,
     `No. of Timeslots: ${s.timeslot_count}`,
     `Duration of Time slots: ${s.timeslot_duration_minutes} minutes`,
+    `Auto-unready after: ${s.auto_unready_minutes} minutes`,
     `Start of each time slot: ${s.timeslot_starts}`,
     `Total tournament days: ${s.season_days}`,
     `Tournament start date: ${startDate}`,
-    `Elapsed tournament days (for attendance): ${elapsedDays}`,
+    `Elapsed fully-completed tournament days (for attendance): ${elapsedDays}`,
     `SHOW% behavior: starts at 100% and drops by ${dropPerDay}% per missed day`,
     `Minimum show up % required (eligibility threshold): ${minShowupPercent}%`,
     `Minimum check-in days required: ${effectiveMinAttendanceDays} (includes max ${missedAllowance} missed check-ins allowance)`,
@@ -762,6 +826,13 @@ function removeFromReadyQueue(discord_user_id) {
   db.prepare(`
     DELETE FROM ready_queue WHERE league_id = 1 AND discord_user_id = ?
   `).run(discord_user_id);
+}
+
+function clearReadyQueueForClosedCheckin() {
+  const queueCount = Number(db.prepare('SELECT COUNT(1) AS c FROM ready_queue WHERE league_id = 1').get().c || 0);
+  if (queueCount <= 0) return 0;
+  db.prepare('DELETE FROM ready_queue WHERE league_id = 1').run();
+  return queueCount;
 }
 
 function popReadyUsers() {
@@ -927,6 +998,27 @@ async function createPendingMatch(fixture, channel, guildId) {
 
 async function tryMatchmake(guild) {
   const settings = getGuildSettings(guild.id);
+  const league = db.prepare('SELECT timeslot_duration_minutes, auto_unready_minutes, timeslot_starts FROM leagues WHERE league_id = 1').get() || {};
+  const checkinStatus = buildCheckinWindowStatus(league);
+  if (!checkinStatus.inSlot) {
+    const removedCount = clearReadyQueueForClosedCheckin();
+    if (removedCount > 0) {
+      logAudit('queue_auto_cleared_checkin_closed', null, {
+        guildId: guild.id,
+        removedCount,
+        nowHHMM: checkinStatus.nowHHMM,
+        nextStart: checkinStatus.nextStart,
+      });
+      await sendActivityNotification(guild, settings, `🕒 Check-in is closed (${checkinStatus.nowHHMM}). Cleared ready queue (${removedCount} player${removedCount === 1 ? '' : 's'}).`).catch(() => null);
+    }
+    return;
+  }
+
+  const expiredRemoved = purgeExpiredReadyQueueEntries(league);
+  if (expiredRemoved > 0) {
+    logAudit('queue_auto_unready_expired', null, { guildId: guild.id, removedCount: expiredRemoved, readyWindowMinutes: getReadyWindowMinutes(league) });
+  }
+
   const channelId = settings.results_channel_id || MATCH_CHANNEL_ID;
   if (!channelId) return;
 
@@ -1446,7 +1538,7 @@ async function handleInteractionCreate(interaction) {
         const email = decryptString(p.email_enc);
         const phone = decryptString(p.phone_enc);
 
-        await interaction.reply({
+        await safeInteractionReply(interaction, {
           content: [
             `Real name: ${realName}`,
             `Tekken tag: ${p.tekken_tag}`,
@@ -1465,7 +1557,7 @@ async function handleInteractionCreate(interaction) {
           return;
         }
 
-        const league = db.prepare('SELECT timeslot_duration_minutes, timeslot_starts FROM leagues WHERE league_id = 1').get() || {};
+        const league = db.prepare('SELECT timeslot_duration_minutes, auto_unready_minutes, timeslot_starts FROM leagues WHERE league_id = 1').get() || {};
         const status = buildCheckinWindowStatus(league);
         const today = getTodayISO(true);
 
@@ -1537,6 +1629,22 @@ async function handleInteractionCreate(interaction) {
           return;
         }
 
+        const league = db.prepare('SELECT timeslot_duration_minutes, auto_unready_minutes, timeslot_starts FROM leagues WHERE league_id = 1').get() || {};
+        const checkinStatus = buildCheckinWindowStatus(league);
+        if (!checkinStatus.inSlot) {
+          const removedCount = clearReadyQueueForClosedCheckin();
+          if (removedCount > 0) {
+            logAudit('queue_auto_cleared_checkin_closed', interaction.user.id, {
+              removedCount,
+              nowHHMM: checkinStatus.nowHHMM,
+              nextStart: checkinStatus.nextStart,
+            });
+            await sendActivityNotification(interaction.guild, getGuildSettings(interaction.guildId), `🕒 Check-in is closed (${checkinStatus.nowHHMM}). Cleared ready queue (${removedCount} player${removedCount === 1 ? '' : 's'}).`).catch(() => null);
+          }
+          await interaction.reply({ content: `Queue is closed because check-in is over for now. Next slot: ${checkinStatus.nextStart} (${checkinStatus.nextStartDayText}).` });
+          return;
+        }
+
         if (!hasCheckedInToday(interaction.user.id)) {
           await interaction.reply({ content: 'Please /checkin for today first (attendance rule).' });
           return;
@@ -1547,6 +1655,7 @@ async function handleInteractionCreate(interaction) {
           return;
         }
 
+        purgeExpiredReadyQueueEntries(league);
         addToReadyQueue(interaction.user.id);
         logAudit('queue_join', interaction.user.id);
         await sendActivityNotification(interaction.guild, getGuildSettings(interaction.guildId), `🟢 Ready: <@${interaction.user.id}> joined the queue.`).catch(() => null);
@@ -1597,6 +1706,7 @@ async function handleInteractionCreate(interaction) {
       }
 
       if (name === 'queue') {
+        purgeExpiredReadyQueueEntries();
         const queue = getReadyQueueSnapshot();
         if (!queue.length) {
           await interaction.reply({ content: 'Ready queue is currently empty.', ephemeral: false });
@@ -1643,7 +1753,7 @@ ${lines.join('\n')}`, ephemeral: false });
             '• /standings or /table — view live standings table anytime',
             '• /matches — view recent match IDs and statuses',
             '• /mydata — view your private stored profile details',
-            'Admins: /adminhelp, /points, /admin_vs, /bot_settings, /admin_status, /admin_player_matches, /admin_player_left, /admin_tournament_settings, /admin_setup_tournament, /admin_generate_fixtures, /admin_force_result, /admin_void_match, /admin_dispute_match, /admin_dq_player, /admin_rename_player, /admin_reset, /admin_reset_confirm, /admin_reset_league',
+            'Admins: /adminhelp, /points, /admin_vs, /bot_settings, /admin_status, /admin_player_matches, /admin_player_left, /admin_tournament_settings, /admin_setup_tournament, /admin_generate_fixtures, /admin_force_result, /admin_void_match, /admin_dispute_match, /admin_dq_player, /admin_dq_remain, /admin_rename_player, /admin_allowance_player, /admin_reset, /admin_reset_confirm, /admin_reset_league',
           ].join('\n'),
         });
         return;
@@ -1651,12 +1761,12 @@ ${lines.join('\n')}`, ephemeral: false });
 
 
       if (name === 'helpplayer' || name === 'playerhelp') {
-        await interaction.reply({
+        await safeInteractionReply(interaction, {
           content: [
             '**Player Help**',
             '1) `/signup` to register your league details.',
             '2) `/checkin` daily to count attendance.',
-            '3) `/ready` when you can play now, `/unready` when you cannot.',
+            '3) `/ready` during open check-in windows, `/unready` when you cannot play.',
             '4) Use `/standings` or `/table` anytime for the league table.',
             '5) Use `/queue` to see who is currently available.',
             '6) Use `/left` to see opponents and remaining matches sorted by priority.',
@@ -1669,11 +1779,11 @@ ${lines.join('\n')}`, ephemeral: false });
 
       if (name === 'adminhelp') {
         if (!isAdmin(interaction)) {
-          await interaction.reply({ content: 'Admin only.', ephemeral: true });
+          await safeInteractionReply(interaction, { content: 'Admin only.', ephemeral: true });
           return;
         }
 
-        await interaction.reply({
+        await safeInteractionReply(interaction, {
           content: [
             '**Admin Commands Help**',
             '• /admin_status — quick league health + queue snapshot.',
@@ -1688,7 +1798,9 @@ ${lines.join('\n')}`, ephemeral: false });
             '• /admin_void_match — remove result and reopen fixture.',
             '• /admin_dispute_match — mark a match disputed and notify staff.',
             '• /admin_dq_player — disqualify a player (all fixtures count as 0-3 losses).',
+            '• /admin_dq_remain — disqualify a player and auto-forfeit remaining fixtures only.',
             '• /admin_rename_player — rename the player tag shown on standings/table.',
+            '• /admin_allowance_player — add/remove extra missed check-in allowance days.',
             '• /admin_reset and /admin_reset_league — request reset token (5 min expiry).',
             '• /admin_reset_confirm — confirm pending reset with your token.',
           ].join('\n'),
@@ -1944,7 +2056,7 @@ ${lines.join('\n')}`, ephemeral: false });
         }
 
         const target = interaction.options.getUser('player', true);
-        const player = getPlayer(target.id);
+        const player = getPlayer(target.id, { includeDisqualified: true });
         if (!player) {
           await interaction.reply({ content: 'That user is not signed up in the league.', ephemeral: true });
           return;
@@ -1971,6 +2083,38 @@ ${lines.join('\n')}`, ephemeral: false });
         return;
       }
 
+      if (name === 'admin_allowance_player') {
+        if (!isAdmin(interaction)) {
+          await interaction.reply({ content: 'Admin only.', ephemeral: true });
+          return;
+        }
+
+        const target = interaction.options.getUser('player', true);
+        const deltaDays = interaction.options.getInteger('days', true);
+        const player = getPlayer(target.id, { includeDisqualified: true });
+        if (!player) {
+          await interaction.reply({ content: 'That user is not signed up in the league.', ephemeral: true });
+          return;
+        }
+
+        const currentBonus = Math.max(0, Number(player.allowance_bonus_days || 0));
+        const nextBonus = Math.max(0, currentBonus + Number(deltaDays || 0));
+
+        db.prepare('UPDATE players SET allowance_bonus_days = ? WHERE league_id = 1 AND discord_user_id = ?').run(nextBonus, target.id);
+        logAudit('admin_allowance_player', interaction.user.id, {
+          targetUserId: target.id,
+          deltaDays,
+          from: currentBonus,
+          to: nextBonus,
+        });
+
+        await interaction.reply({
+          content: `Updated allowance bonus for **${player.tekken_tag}**: ${currentBonus} → ${nextBonus} day(s).`,
+          ephemeral: true,
+        });
+        return;
+      }
+
       if (name === 'admin_tournament_settings') {
         if (!isAdmin(interaction)) {
           await interaction.reply({ content: 'Admin only.', ephemeral: true });
@@ -1990,6 +2134,7 @@ ${lines.join('\n')}`, ephemeral: false });
         const maxPlayers = interaction.options.getInteger('max_players');
         const timeslotCount = interaction.options.getInteger('timeslot_count');
         const timeslotDurationMinutes = interaction.options.getInteger('timeslot_duration_minutes');
+        const autoUnreadyMinutes = interaction.options.getInteger('auto_unready_minutes');
         const timeSlotStartsRaw = interaction.options.getString('timeslot_starts');
         const clearTimeslotStarts = interaction.options.getBoolean('clear_timeslot_starts') === true;
         const totalTournamentDays = interaction.options.getInteger('total_tournament_days');
@@ -2004,7 +2149,7 @@ ${lines.join('\n')}`, ephemeral: false });
           return;
         }
 
-        const hasAnyUpdate = [maxPlayers, timeslotCount, timeslotDurationMinutes, timeSlotStartsRaw, totalTournamentDays, minimumShowupPercent, tournamentStartDateRaw]
+        const hasAnyUpdate = [maxPlayers, timeslotCount, timeslotDurationMinutes, autoUnreadyMinutes, timeSlotStartsRaw, totalTournamentDays, minimumShowupPercent, tournamentStartDateRaw]
           .some(v => v !== null && v !== undefined);
         if (!hasAnyUpdate && !clearTimeslotStarts) {
           await interaction.reply({
@@ -2019,6 +2164,7 @@ ${buildTournamentSettingsMessage()}`,
           maxPlayers,
           timeslotCount,
           timeslotDurationMinutes,
+          autoUnreadyMinutes,
           timeSlotStartsRaw,
           clearTimeslotStarts,
           totalTournamentDays,
@@ -2036,6 +2182,7 @@ ${buildTournamentSettingsMessage()}`,
           max_players: validated.values.max_players ?? current.max_players,
           timeslot_count: validated.values.timeslot_count ?? current.timeslot_count,
           timeslot_duration_minutes: validated.values.timeslot_duration_minutes ?? current.timeslot_duration_minutes,
+          auto_unready_minutes: validated.values.auto_unready_minutes ?? current.auto_unready_minutes,
           timeslot_starts: validated.values.timeslot_starts ?? current.timeslot_starts,
           season_days: validated.values.season_days ?? current.season_days,
           eligibility_min_percent: validated.values.eligibility_min_percent ?? current.eligibility_min_percent,
@@ -2067,6 +2214,7 @@ ${buildTournamentSettingsMessage()}`,
             max_players = ?,
             timeslot_count = ?,
             timeslot_duration_minutes = ?,
+            auto_unready_minutes = ?,
             timeslot_starts = ?,
             season_days = ?,
             eligibility_min_percent = ?,
@@ -2077,6 +2225,7 @@ ${buildTournamentSettingsMessage()}`,
           merged.max_players,
           merged.timeslot_count,
           merged.timeslot_duration_minutes,
+          merged.auto_unready_minutes,
           merged.timeslot_starts,
           merged.season_days,
           merged.eligibility_min_percent,
@@ -2251,13 +2400,13 @@ ${buildTournamentSettingsMessage()}`,
 
         const target = interaction.options.getUser('player', true);
         const reason = (interaction.options.getString('reason') || 'Manual admin disqualification').trim();
-        const player = getPlayer(target.id);
+        const player = getPlayer(target.id, { includeDisqualified: true });
         if (!player) {
           await interaction.reply({ content: 'That user is not signed up in the league.', ephemeral: true });
           return;
         }
 
-        if (player.status === 'disqualified') {
+        if (isDisqualifiedStatus(player.status)) {
           await interaction.reply({ content: `${player.tekken_tag} is already disqualified.`, ephemeral: true });
           return;
         }
@@ -2266,6 +2415,7 @@ ${buildTournamentSettingsMessage()}`,
           db.prepare("UPDATE players SET status = 'disqualified' WHERE league_id = 1 AND discord_user_id = ?").run(target.id);
           db.prepare('DELETE FROM attendance WHERE league_id = 1 AND discord_user_id = ?').run(target.id);
           db.prepare('DELETE FROM ready_queue WHERE league_id = 1 AND discord_user_id = ?').run(target.id);
+          db.prepare("UPDATE matches SET state = 'cancelled', ended_at = datetime('now') WHERE league_id = 1 AND (player_a_discord_id = ? OR player_b_discord_id = ?) AND state IN ('pending','reported','active','disputed')").run(target.id, target.id);
           db.prepare("UPDATE pending_matches SET accept_a = CASE WHEN player_a_discord_id = ? THEN 0 ELSE accept_a END, accept_b = CASE WHEN player_b_discord_id = ? THEN 0 ELSE accept_b END WHERE league_id = 1 AND (player_a_discord_id = ? OR player_b_discord_id = ?)").run(target.id, target.id, target.id, target.id);
         });
         tx();
@@ -2281,6 +2431,104 @@ ${buildTournamentSettingsMessage()}`,
 
         await interaction.reply({
           content: `Disqualified ${player.tekken_tag}. Their fixtures are now scored as 0-3 forfeits, prior wins are overridden on standings, and allowance is forced to 0.`,
+          ephemeral: true,
+        });
+        return;
+      }
+
+
+      if (name === 'admin_dq_remain') {
+        if (!isAdmin(interaction)) {
+          await interaction.reply({ content: 'Admin only.', ephemeral: true });
+          return;
+        }
+
+        const target = interaction.options.getUser('player', true);
+        const reason = (interaction.options.getString('reason') || 'Manual admin remaining-fixtures disqualification').trim();
+        const player = getPlayer(target.id, { includeDisqualified: true });
+        if (!player) {
+          await interaction.reply({ content: 'That user is not signed up in the league.', ephemeral: true });
+          return;
+        }
+
+        if (isDisqualifiedStatus(player.status)) {
+          await interaction.reply({ content: `${player.tekken_tag} is already disqualified.`, ephemeral: true });
+          return;
+        }
+
+        let fixturesForfeited = 0;
+        const tx = db.transaction(() => {
+          db.prepare("UPDATE players SET status = 'disqualified_remaining' WHERE league_id = 1 AND discord_user_id = ?").run(target.id);
+          db.prepare('DELETE FROM ready_queue WHERE league_id = 1 AND discord_user_id = ?').run(target.id);
+          db.prepare("UPDATE pending_matches SET accept_a = CASE WHEN player_a_discord_id = ? THEN 0 ELSE accept_a END, accept_b = CASE WHEN player_b_discord_id = ? THEN 0 ELSE accept_b END WHERE league_id = 1 AND (player_a_discord_id = ? OR player_b_discord_id = ?)").run(target.id, target.id, target.id, target.id);
+
+          const remainingFixtures = db.prepare(`
+            SELECT fixture_id, player_a_discord_id, player_b_discord_id
+            FROM fixtures
+            WHERE league_id = 1
+              AND (player_a_discord_id = ? OR player_b_discord_id = ?)
+              AND status IN ('unplayed','locked_in_match')
+            ORDER BY fixture_id ASC
+          `).all(target.id, target.id);
+
+          const findExistingMatch = db.prepare('SELECT match_id FROM matches WHERE fixture_id = ? ORDER BY match_id DESC LIMIT 1');
+          const insertMatch = db.prepare(`
+            INSERT INTO matches (league_id, fixture_id, player_a_discord_id, player_b_discord_id, state, ended_at)
+            VALUES (1, ?, ?, ?, 'confirmed', datetime('now'))
+          `);
+          const updateMatch = db.prepare("UPDATE matches SET state = 'confirmed', ended_at = datetime('now') WHERE match_id = ?");
+          const deleteResult = db.prepare('DELETE FROM results WHERE match_id = ?');
+          const insertResult = db.prepare(`
+            INSERT INTO results (match_id, winner_discord_id, score_a, score_b, is_forfeit, reporter_discord_id, confirmer_discord_id, confirmed_at)
+            VALUES (?, ?, ?, ?, 1, ?, ?, datetime('now'))
+          `);
+          const updateFixture = db.prepare("UPDATE fixtures SET status = 'confirmed', confirmed_at = datetime('now') WHERE fixture_id = ?");
+          const clearReports = db.prepare('DELETE FROM match_reports WHERE match_id = ?');
+          const clearRematchVotes = db.prepare('DELETE FROM rematch_votes WHERE match_id = ?');
+          const clearOverrides = db.prepare('DELETE FROM admin_match_overrides WHERE match_id = ?');
+          const clearPendingForFixture = db.prepare('DELETE FROM pending_matches WHERE fixture_id = ?');
+
+          for (const fixture of remainingFixtures) {
+            clearPendingForFixture.run(fixture.fixture_id);
+
+            const existingMatch = findExistingMatch.get(fixture.fixture_id);
+            let matchId;
+            if (existingMatch?.match_id) {
+              matchId = existingMatch.match_id;
+              updateMatch.run(matchId);
+            } else {
+              const inserted = insertMatch.run(fixture.fixture_id, fixture.player_a_discord_id, fixture.player_b_discord_id);
+              matchId = inserted.lastInsertRowid;
+            }
+
+            const winnerId = fixture.player_a_discord_id === target.id ? fixture.player_b_discord_id : fixture.player_a_discord_id;
+            const scoreA = winnerId === fixture.player_a_discord_id ? 3 : 0;
+            const scoreB = winnerId === fixture.player_b_discord_id ? 3 : 0;
+
+            deleteResult.run(matchId);
+            clearReports.run(matchId);
+            clearRematchVotes.run(matchId);
+            clearOverrides.run(matchId);
+            insertResult.run(matchId, winnerId, scoreA, scoreB, interaction.user.id, interaction.user.id);
+            updateFixture.run(fixture.fixture_id);
+            fixturesForfeited += 1;
+          }
+        });
+        tx();
+
+        logAudit('admin_dq_remain', interaction.user.id, { targetUserId: target.id, reason, fixturesForfeited });
+
+        const gs = getGuildSettings(interaction.guildId);
+        await sendAdminNotification(
+          interaction.guild,
+          gs,
+          `⛔ Player disqualified (remaining fixtures only): <@${target.id}> (${target.id})
+Reason: ${reason}
+Remaining fixtures auto-forfeited 0-3: ${fixturesForfeited}`,
+        ).catch(() => null);
+
+        await interaction.reply({
+          content: `Disqualified ${player.tekken_tag} for remaining fixtures only. Auto-forfeited ${fixturesForfeited} fixture(s) as 0-3 losses.`,
           ephemeral: true,
         });
         return;
@@ -2383,12 +2631,16 @@ ${buildTournamentSettingsMessage()}`,
     }
 
   } catch (err) {
+    if (isUnknownInteractionError(err)) {
+      console.warn('Interaction expired before response (Unknown interaction).');
+      return;
+    }
     console.error(err);
     try {
       if (interaction.deferred || interaction.replied) {
         await interaction.followUp({ content: 'An error occurred.', ephemeral: true });
       } else {
-        await interaction.reply({ content: 'An error occurred.', ephemeral: true });
+        await safeInteractionReply(interaction, { content: 'An error occurred.', ephemeral: true });
       }
     } catch (_) {
       // ignore
