@@ -30,6 +30,27 @@ test('recalculateAndStorePowerRankings uses baseline league strength for players
   db.close();
 });
 
+
+test('league-disqualified players get maximum DQ penalty behavior regardless of dq_count', () => {
+  const db = new Database(':memory:');
+  initDb(db);
+
+  db.prepare(`
+    INSERT INTO players (
+      league_id, discord_user_id, tekken_tag, real_name_enc, email_enc, phone_enc,
+      status, dq_count, ranked_tier_score, ranked_recent_win_rate, ranked_recent_matches, ranked_recent_activity
+    ) VALUES (1, 'dq1', 'DQPlayer', 'a', 'b', 'c', 'disqualified', 1, 80, 70, 25, 0.8)
+  `).run();
+
+  const rankings = recalculateAndStorePowerRankings(db, 1);
+  assert.equal(rankings.length, 1);
+  assert.equal(Number(rankings[0].reliability_index_score), 0);
+  assert.equal(rankings[0].seeding_restriction, 'lowest_seed_pool');
+  assert.equal(Number(rankings[0].seeding_asterisk), 1);
+
+  db.close();
+});
+
 test('generateSeedsFromPowerRankings applies DQ-based hard seeding rules', () => {
   const rankings = [
     { discord_user_id: 'a', tekken_tag: 'A', power_player_rating: 99, dq_count: 0, seeding_restriction: 'none', seeding_asterisk: 0 },

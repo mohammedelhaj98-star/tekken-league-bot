@@ -141,7 +141,10 @@ function calculatePowerComponents(row, context) {
   const recentResultsTrend = clamp((recentResultsCount / 20) * 100);
   const activityMomentum = clamp((0.50 * recentRankedActivity) + (0.30 * recentLeagueActivity) + (0.20 * recentResultsTrend));
 
-  const reliabilityIndex = clamp(reliabilityFromDqCount(row.dq_count));
+  const dqCount = Math.max(0, Math.trunc(Number(row.dq_count) || 0));
+  const effectiveDqCount = row.status === 'disqualified' ? Math.max(dqCount, 3) : dqCount;
+
+  const reliabilityIndex = clamp(reliabilityFromDqCount(effectiveDqCount));
   const totalPowerPlayerRating = clamp(
     (0.45 * leagueStrength)
     + (0.25 * rankedStrength)
@@ -149,10 +152,9 @@ function calculatePowerComponents(row, context) {
     + (0.15 * reliabilityIndex)
   );
 
-  const dqCount = Math.max(0, Math.trunc(Number(row.dq_count) || 0));
-  const seedingRestriction = dqCount >= 3
+  const seedingRestriction = effectiveDqCount >= 3
     ? 'lowest_seed_pool'
-    : dqCount >= 2
+    : effectiveDqCount >= 2
       ? 'bottom_quarter_cap'
       : 'none';
 
@@ -163,7 +165,7 @@ function calculatePowerComponents(row, context) {
     reliabilityIndex,
     totalPowerPlayerRating,
     seedingRestriction,
-    seedingAsterisk: dqCount >= 3 ? 1 : 0,
+    seedingAsterisk: effectiveDqCount >= 3 ? 1 : 0,
     dqCount,
   };
 }
