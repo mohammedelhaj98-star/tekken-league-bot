@@ -203,7 +203,7 @@ function upsertLastSeenDisplayName(discord_user_id, displayName) {
 function getPlayer(discord_user_id, { includeDisqualified = false } = {}) {
   if (includeDisqualified) {
     return db.prepare(`
-      SELECT * FROM players WHERE league_id = 1 AND discord_user_id = ? AND status IN ('active', 'disqualified')
+      SELECT * FROM players WHERE league_id = 1 AND discord_user_id = ? AND status IN ('active', 'disqualified', 'disqualified_remaining')
     `).get(discord_user_id);
   }
 
@@ -744,7 +744,7 @@ function buildStandingsListMessage() {
   const standings = computeStandings(db, 1);
   if (!standings.length) return '**Standings**\nNo active players yet. Use /signup to join the league.';
 
-  const lines = standings.map((s, idx) => `${idx + 1}. ${s.tekken_tag}${s.status === 'disqualified' ? ' (DQ)' : ''}`);
+  const lines = standings.map((s, idx) => `${idx + 1}. ${s.tekken_tag}${isDisqualifiedStatus(s.status) ? ' (DQ)' : ''}`);
   return `**Standings**\n${lines.join('\n')}`;
 }
 
@@ -807,13 +807,13 @@ function buildStandingsTablePages() {
     const finishedMatches = requiredFixturesPerPlayer > 0 && completed >= requiredFixturesPerPlayer;
     const allowanceBonus = Math.max(0, allowanceBonusById.get(s.discord_user_id) || 0);
     const allowanceRemaining = Math.max(0, (missedAllowance + allowanceBonus) - missedDays);
-    const allowanceText = s.status === 'disqualified'
+    const allowanceText = isDisqualifiedStatus(s.status)
       ? '0'
       : (finishedMatches ? `EXEMPT (${allowanceRemaining})` : `${allowanceRemaining}`);
 
     return {
       rank: String(idx + 1),
-      player: formatCell(`${s.tekken_tag}${s.status === 'disqualified' ? ' (DQ)' : ''}`, 24),
+      player: formatCell(`${s.tekken_tag}${isDisqualifiedStatus(s.status) ? ' (DQ)' : ''}`, 24),
       pts: String(s.points),
       gp: String(s.played),
       w: String(s.wins),
@@ -2083,6 +2083,7 @@ ${lines.join('\n')}`, ephemeral: false });
             '• /admin_void_match — remove result and reopen fixture.',
             '• /admin_dispute_match — mark a match disputed and notify staff.',
             '• /admin_dq_player — disqualify a player (all fixtures count as 0-3 losses).',
+            '• /admin_dq_remain — disqualify a player and auto-forfeit remaining fixtures only.',
             '• /admin_rename_player — rename the player tag shown on standings/table.',
             '• /admin_allowance_player — add/remove extra missed check-in allowance days.',
             '• /admin_reset and /admin_reset_league — request reset token (5 min expiry).',
@@ -2853,7 +2854,7 @@ ${buildTournamentSettingsMessage()}`,
           return;
         }
 
-        if (player.status === 'disqualified') {
+        if (isDisqualifiedStatus(player.status)) {
           await interaction.reply({ content: `${player.tekken_tag} is already disqualified.`, ephemeral: true });
           return;
         }
@@ -2878,6 +2879,104 @@ ${buildTournamentSettingsMessage()}`,
 
         await interaction.reply({
           content: `Disqualified ${player.tekken_tag}. Their fixtures are now scored as 0-3 forfeits, prior wins are overridden on standings, and allowance is forced to 0.`,
+          ephemeral: true,
+        });
+        return;
+      }
+
+
+      if (name === 'admin_dq_remain') {
+        if (!isAdmin(interaction)) {
+          await interaction.reply({ content: 'Admin only.', ephemeral: true });
+          return;
+        }
+
+        const target = interaction.options.getUser('player', true);
+        const reason = (interaction.options.getString('reason') || 'Manual admin remaining-fixtures disqualification').trim();
+        const player = getPlayer(target.id, { includeDisqualified: true });
+        if (!player) {
+          await interaction.reply({ content: 'That user is not signed up in the league.', ephemeral: true });
+          return;
+        }
+
+        if (isDisqualifiedStatus(player.status)) {
+          await interaction.reply({ content: `${player.tekken_tag} is already disqualified.`, ephemeral: true });
+          return;
+        }
+
+        let fixturesForfeited = 0;
+        const tx = db.transaction(() => {
+          db.prepare("UPDATE players SET status = 'disqualified_remaining' WHERE league_id = 1 AND discord_user_id = ?").run(target.id);
+          db.prepare('DELETE FROM ready_queue WHERE league_id = 1 AND discord_user_id = ?').run(target.id);
+          db.prepare("UPDATE pending_matches SET accept_a = CASE WHEN player_a_discord_id = ? THEN 0 ELSE accept_a END, accept_b = CASE WHEN player_b_discord_id = ? THEN 0 ELSE accept_b END WHERE league_id = 1 AND (player_a_discord_id = ? OR player_b_discord_id = ?)").run(target.id, target.id, target.id, target.id);
+
+          const remainingFixtures = db.prepare(`
+            SELECT fixture_id, player_a_discord_id, player_b_discord_id
+            FROM fixtures
+            WHERE league_id = 1
+              AND (player_a_discord_id = ? OR player_b_discord_id = ?)
+              AND status IN ('unplayed','locked_in_match')
+            ORDER BY fixture_id ASC
+          `).all(target.id, target.id);
+
+          const findExistingMatch = db.prepare('SELECT match_id FROM matches WHERE fixture_id = ? ORDER BY match_id DESC LIMIT 1');
+          const insertMatch = db.prepare(`
+            INSERT INTO matches (league_id, fixture_id, player_a_discord_id, player_b_discord_id, state, ended_at)
+            VALUES (1, ?, ?, ?, 'confirmed', datetime('now'))
+          `);
+          const updateMatch = db.prepare("UPDATE matches SET state = 'confirmed', ended_at = datetime('now') WHERE match_id = ?");
+          const deleteResult = db.prepare('DELETE FROM results WHERE match_id = ?');
+          const insertResult = db.prepare(`
+            INSERT INTO results (match_id, winner_discord_id, score_a, score_b, is_forfeit, reporter_discord_id, confirmer_discord_id, confirmed_at)
+            VALUES (?, ?, ?, ?, 1, ?, ?, datetime('now'))
+          `);
+          const updateFixture = db.prepare("UPDATE fixtures SET status = 'confirmed', confirmed_at = datetime('now') WHERE fixture_id = ?");
+          const clearReports = db.prepare('DELETE FROM match_reports WHERE match_id = ?');
+          const clearRematchVotes = db.prepare('DELETE FROM rematch_votes WHERE match_id = ?');
+          const clearOverrides = db.prepare('DELETE FROM admin_match_overrides WHERE match_id = ?');
+          const clearPendingForFixture = db.prepare('DELETE FROM pending_matches WHERE fixture_id = ?');
+
+          for (const fixture of remainingFixtures) {
+            clearPendingForFixture.run(fixture.fixture_id);
+
+            const existingMatch = findExistingMatch.get(fixture.fixture_id);
+            let matchId;
+            if (existingMatch?.match_id) {
+              matchId = existingMatch.match_id;
+              updateMatch.run(matchId);
+            } else {
+              const inserted = insertMatch.run(fixture.fixture_id, fixture.player_a_discord_id, fixture.player_b_discord_id);
+              matchId = inserted.lastInsertRowid;
+            }
+
+            const winnerId = fixture.player_a_discord_id === target.id ? fixture.player_b_discord_id : fixture.player_a_discord_id;
+            const scoreA = winnerId === fixture.player_a_discord_id ? 3 : 0;
+            const scoreB = winnerId === fixture.player_b_discord_id ? 3 : 0;
+
+            deleteResult.run(matchId);
+            clearReports.run(matchId);
+            clearRematchVotes.run(matchId);
+            clearOverrides.run(matchId);
+            insertResult.run(matchId, winnerId, scoreA, scoreB, interaction.user.id, interaction.user.id);
+            updateFixture.run(fixture.fixture_id);
+            fixturesForfeited += 1;
+          }
+        });
+        tx();
+
+        logAudit('admin_dq_remain', interaction.user.id, { targetUserId: target.id, reason, fixturesForfeited });
+
+        const gs = getGuildSettings(interaction.guildId);
+        await sendAdminNotification(
+          interaction.guild,
+          gs,
+          `⛔ Player disqualified (remaining fixtures only): <@${target.id}> (${target.id})
+Reason: ${reason}
+Remaining fixtures auto-forfeited 0-3: ${fixturesForfeited}`,
+        ).catch(() => null);
+
+        await interaction.reply({
+          content: `Disqualified ${player.tekken_tag} for remaining fixtures only. Auto-forfeited ${fixturesForfeited} fixture(s) as 0-3 losses.`,
           ephemeral: true,
         });
         return;
