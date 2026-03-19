@@ -424,7 +424,7 @@ const commands = [
 
   new SlashCommandBuilder()
     .setName('admin_dq_remain')
-    .setDescription('Admin: disqualify a player for remaining fixtures only (auto 0-3 forfeits)')
+    .setDescription('Admin: disqualify a player and auto-forfeit remaining fixtures (standings treat all fixtures as losses)')
     .addUserOption(o => o
       .setName('player')
       .setDescription('Player to disqualify for remaining fixtures')

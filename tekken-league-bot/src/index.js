@@ -212,6 +212,10 @@ function getPlayer(discord_user_id, { includeDisqualified = false } = {}) {
   `).get(discord_user_id);
 }
 
+function isDisqualifiedStatus(status) {
+  return status === 'disqualified' || status === 'disqualified_remaining';
+}
+
 
 function ensureSignedUp(interaction) {
   const p = getPlayer(interaction.user.id);
@@ -2083,7 +2087,7 @@ ${lines.join('\n')}`, ephemeral: false });
             '• /admin_void_match — remove result and reopen fixture.',
             '• /admin_dispute_match — mark a match disputed and notify staff.',
             '• /admin_dq_player — disqualify a player (all fixtures count as 0-3 losses).',
-            '• /admin_dq_remain — disqualify a player and auto-forfeit remaining fixtures only.',
+            '• /admin_dq_remain — disqualify a player; standings treat all fixtures as losses and remaining fixtures are auto-forfeited.',
             '• /admin_rename_player — rename the player tag shown on standings/table.',
             '• /admin_allowance_player — add/remove extra missed check-in allowance days.',
             '• /admin_reset and /admin_reset_league — request reset token (5 min expiry).',
@@ -2115,7 +2119,7 @@ ${lines.join('\n')}`, ephemeral: false });
 
         logAudit('admin_points_update', interaction.user.id, rules);
         await interaction.reply({
-          content: `Points updated: win=${rules.points_win}, loss=${rules.points_loss}, no-show=${rules.points_no_show}, 3-0 sweep bonus=${rules.points_sweep_bonus}.`,
+          content: `Points updated: win=${rules.points_win}, loss=${rules.points_loss}, no-show=${rules.points_no_show}, 3-0 sweep bonus=${rules.points_sweep_bonus}. Standings and /table recalculate retroactively from all confirmed results.`,
           ephemeral: true,
         });
         return;
@@ -2970,13 +2974,14 @@ ${buildTournamentSettingsMessage()}`,
         await sendAdminNotification(
           interaction.guild,
           gs,
-          `⛔ Player disqualified (remaining fixtures only): <@${target.id}> (${target.id})
+          `⛔ Player disqualified: <@${target.id}> (${target.id})
 Reason: ${reason}
+Standings now treat all fixtures as 0-3 losses for this player.
 Remaining fixtures auto-forfeited 0-3: ${fixturesForfeited}`,
         ).catch(() => null);
 
         await interaction.reply({
-          content: `Disqualified ${player.tekken_tag} for remaining fixtures only. Auto-forfeited ${fixturesForfeited} fixture(s) as 0-3 losses.`,
+          content: `Disqualified ${player.tekken_tag}. Standings now treat all fixtures as 0-3 losses, and auto-forfeited ${fixturesForfeited} remaining fixture(s).`,
           ephemeral: true,
         });
         return;

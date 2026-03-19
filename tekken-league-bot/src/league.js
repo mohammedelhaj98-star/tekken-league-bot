@@ -155,7 +155,7 @@ function computeStandings(db, league_id = 1) {
 
   const pointRules = getLeaguePointRules(db, league_id);
 
-  const dqIds = new Set(players.filter((p) => p.status === 'disqualified').map((p) => p.discord_user_id));
+  const dqIds = new Set(players.filter((p) => p.status === 'disqualified' || p.status === 'disqualified_remaining').map((p) => p.discord_user_id));
 
   // Join confirmed results with match+fixture to get players (keyed by fixture)
   const confirmed = db.prepare(`
@@ -188,6 +188,16 @@ function computeStandings(db, league_id = 1) {
 
     const aIsDq = dqIds.has(fixture.player_a_discord_id);
     const bIsDq = dqIds.has(fixture.player_b_discord_id);
+
+    // If both sides are league-disqualified, count the fixture as a 0-3 forfeit loss for both
+    // so their played totals still reflect the full schedule.
+    if (aIsDq && bIsDq) {
+      A.games_lost += 3;
+      B.games_lost += 3;
+      A.losses += 1;
+      B.losses += 1;
+      continue;
+    }
 
     // If one side is DQ, that side always loses 0-3.
     if (aIsDq !== bIsDq) {

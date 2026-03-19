@@ -116,6 +116,115 @@ test('generateDoubleRoundRobinFixtures can run repeatedly without duplicating hi
 });
 
 
+
+
+test('computeStandings recalculates all player points retroactively when league point rules change', () => {
+  const db = setupDb();
+
+  db.prepare("INSERT INTO fixtures (league_id, player_a_discord_id, player_b_discord_id, leg_number, status, confirmed_at) VALUES (1,'u1','u2',1,'confirmed',datetime('now'))").run();
+  db.prepare("INSERT INTO matches (league_id, fixture_id, player_a_discord_id, player_b_discord_id, state, ended_at) VALUES (1,1,'u1','u2','confirmed',datetime('now'))").run();
+  db.prepare("INSERT INTO results (match_id, winner_discord_id, score_a, score_b, is_forfeit, reporter_discord_id, confirmer_discord_id, confirmed_at) VALUES (1,'u1',3,0,0,'u1','u2',datetime('now'))").run();
+
+  db.prepare("INSERT INTO fixtures (league_id, player_a_discord_id, player_b_discord_id, leg_number, status, confirmed_at) VALUES (1,'u2','u3',1,'confirmed',datetime('now'))").run();
+  db.prepare("INSERT INTO matches (league_id, fixture_id, player_a_discord_id, player_b_discord_id, state, ended_at) VALUES (1,2,'u2','u3','confirmed',datetime('now'))").run();
+  db.prepare("INSERT INTO results (match_id, winner_discord_id, score_a, score_b, is_forfeit, reporter_discord_id, confirmer_discord_id, confirmed_at) VALUES (2,'u2',3,2,0,'u2','u3',datetime('now'))").run();
+
+  const before = computeStandings(db, 1);
+  assert.equal(before.find((r) => r.discord_user_id === 'u1')?.points, 3);
+  assert.equal(before.find((r) => r.discord_user_id === 'u2')?.points, 3);
+  assert.equal(before.find((r) => r.discord_user_id === 'u3')?.points, 1);
+
+  db.prepare(`
+    UPDATE leagues
+    SET points_win = 5, points_loss = 2, points_no_show = 7, points_sweep_bonus = 3
+    WHERE league_id = 1
+  `).run();
+
+  const after = computeStandings(db, 1);
+  assert.equal(after.find((r) => r.discord_user_id === 'u1')?.points, 8);
+  assert.equal(after.find((r) => r.discord_user_id === 'u2')?.points, 7);
+  assert.equal(after.find((r) => r.discord_user_id === 'u3')?.points, 2);
+
+  db.close();
+});
+
+
+test('computeStandings treats disqualified_remaining players as losses across all fixtures', () => {
+  const db = setupDb();
+
+  db.prepare("INSERT INTO fixtures (league_id, player_a_discord_id, player_b_discord_id, leg_number, status, confirmed_at) VALUES (1,'u1','u2',1,'confirmed',datetime('now'))").run();
+  db.prepare("INSERT INTO matches (league_id, fixture_id, player_a_discord_id, player_b_discord_id, state, ended_at) VALUES (1,1,'u1','u2','confirmed',datetime('now'))").run();
+  db.prepare("INSERT INTO results (match_id, winner_discord_id, score_a, score_b, is_forfeit, reporter_discord_id, confirmer_discord_id, confirmed_at) VALUES (1,'u1',3,1,0,'u1','u2',datetime('now'))").run();
+
+  db.prepare("INSERT INTO fixtures (league_id, player_a_discord_id, player_b_discord_id, leg_number, status, confirmed_at) VALUES (1,'u2','u1',2,'confirmed',datetime('now'))").run();
+  db.prepare("INSERT INTO matches (league_id, fixture_id, player_a_discord_id, player_b_discord_id, state, ended_at) VALUES (1,2,'u2','u1','confirmed',datetime('now'))").run();
+  db.prepare("INSERT INTO results (match_id, winner_discord_id, score_a, score_b, is_forfeit, reporter_discord_id, confirmer_discord_id, confirmed_at) VALUES (2,'u1',0,3,0,'u1','u2',datetime('now'))").run();
+
+  db.prepare("UPDATE players SET status = 'disqualified_remaining' WHERE league_id = 1 AND discord_user_id = 'u1'").run();
+
+  const standings = computeStandings(db, 1);
+  const u1 = standings.find((r) => r.discord_user_id === 'u1');
+  const u2 = standings.find((r) => r.discord_user_id === 'u2');
+
+  assert.ok(u1);
+  assert.ok(u2);
+  assert.equal(u1.status, 'disqualified_remaining');
+  assert.equal(u1.wins, 0);
+  assert.equal(u1.losses, 2);
+  assert.equal(u1.games_won, 0);
+  assert.equal(u1.games_lost, 6);
+  assert.equal(u1.points, 0);
+
+  assert.equal(u2.wins, 2);
+  assert.equal(u2.losses, 0);
+  assert.equal(u2.games_won, 6);
+  assert.equal(u2.games_lost, 0);
+  assert.equal(u2.points, 6);
+
+  db.close();
+});
+
+test('computeStandings counts fixtures between disqualified players toward full schedule totals', () => {
+  const db = setupDb();
+
+  const generated = generateDoubleRoundRobinFixtures(db, 1);
+  assert.equal(generated.ok, true);
+
+  db.prepare("UPDATE players SET status = 'disqualified' WHERE league_id = 1 AND discord_user_id IN ('u1', 'u2')").run();
+
+  const standings = computeStandings(db, 1);
+  const u1 = standings.find((r) => r.discord_user_id === 'u1');
+  const u2 = standings.find((r) => r.discord_user_id === 'u2');
+  const u3 = standings.find((r) => r.discord_user_id === 'u3');
+
+  assert.ok(u1);
+  assert.ok(u2);
+  assert.ok(u3);
+
+  assert.equal(u1.played, 4);
+  assert.equal(u1.wins, 0);
+  assert.equal(u1.losses, 4);
+  assert.equal(u1.games_won, 0);
+  assert.equal(u1.games_lost, 12);
+  assert.equal(u1.points, 0);
+
+  assert.equal(u2.played, 4);
+  assert.equal(u2.wins, 0);
+  assert.equal(u2.losses, 4);
+  assert.equal(u2.games_won, 0);
+  assert.equal(u2.games_lost, 12);
+  assert.equal(u2.points, 0);
+
+  assert.equal(u3.played, 4);
+  assert.equal(u3.wins, 4);
+  assert.equal(u3.losses, 0);
+  assert.equal(u3.games_won, 12);
+  assert.equal(u3.games_lost, 0);
+  assert.equal(u3.points, 12);
+
+  db.close();
+});
+
 test('computeStandings forces disqualified player fixtures to 0-3 losses retroactively', () => {
   const db = setupDb();
 
