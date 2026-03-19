@@ -10,6 +10,7 @@ const {
   ActionRowBuilder,
   PermissionsBitField,
   Partials,
+  AttachmentBuilder,
 } = require('discord.js');
 const { randomBytes } = require('node:crypto');
 
@@ -18,10 +19,14 @@ const { encryptString, decryptString, maskEmail, maskPhone } = require('./crypto
 const { isValidEmail, isValidPhone, normalizeEmail, normalizePhone, cleanTekkenTag, cleanName } = require('./validate');
 const { generateDoubleRoundRobinFixtures, computeStandings, getTodayISO, getLeaguePointRules, normalizePointRules } = require('./league');
 const { validateTournamentSetupInput, parseTimeSlotStarts } = require('./tournament-config');
+const { recalculateAndStorePowerRankings, getPowerRankings, generateSeedsFromPowerRankings, buildPowerRankingsTablePages, getPowerRankingsRenderHash } = require('./power-rankings');
+const { WavuApiService, normalizeTekken8Id, isValidTekken8Id } = require('./services/wavu-api');
+const { syncPlayerWavuData, syncAllLinkedPlayersWavuData } = require('./services/wavu-sync');
 
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
 const MATCH_CHANNEL_ID = process.env.MATCH_CHANNEL_ID;
 const MATCHMAKER_INTERVAL_MS = Number(process.env.MATCHMAKER_INTERVAL_MS || 30000);
+const TEKKEN_ID_CHANGE_COOLDOWN_MS = 60 * 60 * 1000;
 
 if (!DISCORD_TOKEN) {
   console.error('Missing DISCORD_TOKEN in .env');
@@ -33,6 +38,7 @@ if (!MATCH_CHANNEL_ID) {
 
 const db = openDb();
 initDb(db);
+const wavuApi = new WavuApiService();
 
 const TABLE_PAGE_SIZE = 8;
 const QATAR_TIMEZONE = 'Asia/Qatar';
@@ -206,9 +212,32 @@ function getPlayer(discord_user_id, { includeDisqualified = false } = {}) {
   `).get(discord_user_id);
 }
 
+
 function ensureSignedUp(interaction) {
   const p = getPlayer(interaction.user.id);
   return p;
+}
+
+function getTekkenIdOwner(tekken8Id) {
+  return db.prepare(`
+    SELECT discord_user_id
+    FROM players
+    WHERE league_id = 1 AND tekken8_id = ?
+  `).get(String(tekken8Id || '').trim().toUpperCase());
+}
+
+function isTekkenIdChangeOnCooldown(player) {
+  if (!player?.tekken_id_updated_at) return false;
+  const then = new Date(player.tekken_id_updated_at).getTime();
+  if (!Number.isFinite(then)) return false;
+  return (Date.now() - then) < TEKKEN_ID_CHANGE_COOLDOWN_MS;
+}
+
+function formatCooldownRemaining(player) {
+  const then = new Date(player?.tekken_id_updated_at || 0).getTime();
+  const remainingMs = Math.max(0, TEKKEN_ID_CHANGE_COOLDOWN_MS - (Date.now() - then));
+  const mins = Math.ceil(remainingMs / 60000);
+  return `${mins} minute(s)`;
 }
 
 function logAudit(actionType, actorDiscordId, payload = null) {
@@ -265,6 +294,10 @@ function updateGuildSetting(guildId, patch) {
       standings_channel_id = ?,
       dispute_channel_id = ?,
       activity_channel_id = ?,
+      power_rankings_channel_id = ?,
+      power_rankings_message_ids_json = ?,
+      power_rankings_last_hash = ?,
+      power_rankings_last_updated_at = ?,
       match_format = ?,
       allow_public_player_commands = ?,
       tournament_name = ?,
@@ -280,6 +313,10 @@ function updateGuildSetting(guildId, patch) {
     merged.standings_channel_id || null,
     merged.dispute_channel_id || null,
     merged.activity_channel_id || null,
+    merged.power_rankings_channel_id || null,
+    merged.power_rankings_message_ids_json || null,
+    merged.power_rankings_last_hash || null,
+    merged.power_rankings_last_updated_at || null,
     merged.match_format || 'FT3',
     merged.allow_public_player_commands ? 1 : 0,
     merged.tournament_name || 'Tekken League',
@@ -551,6 +588,102 @@ function buildMatchesMessage(limit = 30, discordUserId = null) {
     : `**Recent Matches (latest ${rows.length})**`;
 
   return `${title}\n${lines.join('\n')}`;
+}
+
+
+function csvEscape(value) {
+  if (value == null) return '';
+  const str = String(value);
+  if (/[,"\n]/.test(str)) {
+    return `"${str.replace(/"/g, '""')}"`;
+  }
+  return str;
+}
+
+function buildCountedMatchesCsv() {
+  const rows = db.prepare(`
+    SELECT
+      m.match_id,
+      m.fixture_id,
+      m.guild_id,
+      m.player_a_discord_id,
+      pa.tekken_tag AS player_a_tekken_tag,
+      m.player_b_discord_id,
+      pb.tekken_tag AS player_b_tekken_tag,
+      r.winner_discord_id,
+      pw.tekken_tag AS winner_tekken_tag,
+      r.score_a,
+      r.score_b,
+      r.is_forfeit,
+      r.reporter_discord_id,
+      r.confirmer_discord_id,
+      r.reported_at,
+      r.confirmed_at,
+      m.created_at,
+      m.ended_at,
+      f.leg_number
+    FROM matches m
+    JOIN fixtures f ON f.fixture_id = m.fixture_id
+    JOIN results r ON r.match_id = m.match_id
+    LEFT JOIN players pa ON pa.league_id = m.league_id AND pa.discord_user_id = m.player_a_discord_id
+    LEFT JOIN players pb ON pb.league_id = m.league_id AND pb.discord_user_id = m.player_b_discord_id
+    LEFT JOIN players pw ON pw.league_id = m.league_id AND pw.discord_user_id = r.winner_discord_id
+    WHERE m.league_id = 1
+      AND r.confirmed_at IS NOT NULL
+    ORDER BY r.confirmed_at ASC, m.match_id ASC
+  `).all();
+
+  const header = [
+    'match_id',
+    'fixture_id',
+    'leg_number',
+    'guild_id',
+    'player_a_discord_id',
+    'player_a_tekken_tag',
+    'player_b_discord_id',
+    'player_b_tekken_tag',
+    'winner_discord_id',
+    'winner_tekken_tag',
+    'score_a',
+    'score_b',
+    'is_forfeit',
+    'reporter_discord_id',
+    'confirmer_discord_id',
+    'match_created_at',
+    'match_ended_at',
+    'result_reported_at',
+    'result_confirmed_at',
+  ];
+
+  const lines = [header.join(',')];
+  for (const row of rows) {
+    lines.push([
+      row.match_id,
+      row.fixture_id,
+      row.leg_number,
+      row.guild_id,
+      row.player_a_discord_id,
+      row.player_a_tekken_tag,
+      row.player_b_discord_id,
+      row.player_b_tekken_tag,
+      row.winner_discord_id,
+      row.winner_tekken_tag,
+      row.score_a,
+      row.score_b,
+      row.is_forfeit,
+      row.reporter_discord_id,
+      row.confirmer_discord_id,
+      row.created_at,
+      row.ended_at,
+      row.reported_at,
+      row.confirmed_at,
+    ].map(csvEscape).join(','));
+  }
+
+  return {
+    rowCount: rows.length,
+    csv: `${lines.join('\n')}\n`,
+  };
 }
 
 function buildLeftToPlayMessage(discordUserId) {
@@ -1420,6 +1553,8 @@ client.on(Events.MessageReactionRemove, async (reaction, user) => {
 });
 
 let matchmakerTimer = null;
+let dailyPowerRefreshTimer = null;
+let lastPowerRefreshDay = '';
 
 async function runMatchmakingTick() {
   for (const guild of client.guilds.cache.values()) {
@@ -1436,6 +1571,89 @@ function invokeMatchmakingTickSafely() {
   }
   runMatchmakingTick().catch((err) => {
     console.error('Background matchmaking tick failed:', err);
+  });
+}
+
+async function refreshPowerRankingMessagesForGuild(guild, { force = false } = {}) {
+  if (!guild) return { updated: false, reason: 'no_guild' };
+
+  await syncAllLinkedPlayersWavuData(db, { leagueId: 1, wavuApi }).catch(() => null);
+  const rankings = recalculateAndStorePowerRankings(db, 1);
+  const hashPages = buildPowerRankingsTablePages(rankings, { pageSize: 20, includeTimestamp: false });
+  const renderHash = getPowerRankingsRenderHash(hashPages);
+  const pages = buildPowerRankingsTablePages(rankings, { pageSize: 20, includeTimestamp: true });
+
+  const settings = getGuildSettings(guild.id);
+  if (!force && settings.power_rankings_last_hash && settings.power_rankings_last_hash === renderHash) {
+    return { updated: false, reason: 'no_change', rankingsCount: rankings.length };
+  }
+
+  const preferredChannelId = settings.power_rankings_channel_id || settings.standings_channel_id || settings.results_channel_id || MATCH_CHANNEL_ID;
+  if (!preferredChannelId) return { updated: false, reason: 'no_channel', rankingsCount: rankings.length };
+
+  const channel = await guild.channels.fetch(preferredChannelId).catch(() => null);
+  if (!channel || !channel.isTextBased()) return { updated: false, reason: 'invalid_channel', rankingsCount: rankings.length };
+
+  let existingIds = [];
+  try {
+    existingIds = settings.power_rankings_message_ids_json ? JSON.parse(settings.power_rankings_message_ids_json) : [];
+    if (!Array.isArray(existingIds)) existingIds = [];
+  } catch {
+    existingIds = [];
+  }
+
+  const nextIds = [];
+  for (let i = 0; i < pages.length; i += 1) {
+    const content = pages[i];
+    const existingId = existingIds[i];
+    if (existingId) {
+      const msg = await channel.messages.fetch(existingId).catch(() => null);
+      if (msg) {
+        await msg.edit({ content }).catch(() => null);
+        nextIds.push(msg.id);
+        continue;
+      }
+    }
+    const sent = await channel.send({ content }).catch(() => null);
+    if (sent) nextIds.push(sent.id);
+  }
+
+  for (let i = pages.length; i < existingIds.length; i += 1) {
+    const extraId = existingIds[i];
+    const extra = await channel.messages.fetch(extraId).catch(() => null);
+    if (extra) await extra.delete().catch(() => null);
+  }
+
+  updateGuildSetting(guild.id, {
+    power_rankings_channel_id: preferredChannelId,
+    power_rankings_message_ids_json: JSON.stringify(nextIds),
+    power_rankings_last_hash: renderHash,
+    power_rankings_last_updated_at: new Date().toISOString(),
+  });
+
+  return { updated: true, reason: 'updated', rankingsCount: rankings.length, pageCount: pages.length };
+}
+
+async function refreshPowerRankingsForAllGuilds({ force = false } = {}) {
+  const outcomes = [];
+  for (const guild of client.guilds.cache.values()) {
+    // eslint-disable-next-line no-await-in-loop
+    const outcome = await refreshPowerRankingMessagesForGuild(guild, { force }).catch((err) => ({ updated: false, reason: `error:${err.message}` }));
+    outcomes.push({ guildId: guild.id, ...outcome });
+  }
+  return outcomes;
+}
+
+function getUtcDayKey() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function runDailyPowerRefreshTick() {
+  const day = getUtcDayKey();
+  if (lastPowerRefreshDay === day) return;
+  lastPowerRefreshDay = day;
+  refreshPowerRankingsForAllGuilds({ force: false }).catch((err) => {
+    console.error('Daily power rankings refresh failed:', err);
   });
 }
 
@@ -1456,6 +1674,15 @@ client.once(Events.ClientReady, () => {
 
   // Kick one immediate pass on startup.
   invokeMatchmakingTickSafely();
+
+  refreshPowerRankingsForAllGuilds({ force: false }).catch((err) => {
+    console.error('Initial power ranking refresh failed:', err);
+  });
+
+  runDailyPowerRefreshTick();
+  dailyPowerRefreshTimer = setInterval(() => {
+    runDailyPowerRefreshTick();
+  }, 60 * 60 * 1000);
 });
 
 async function handleInteractionCreate(interaction) {
@@ -1468,7 +1695,7 @@ async function handleInteractionCreate(interaction) {
 
     // Keep last seen name updated if signed up
     const displayName = getDisplayNameFromInteraction(interaction);
-    const existing = getPlayer(interaction.user.id);
+    const existing = getPlayer(interaction.user.id, { includeDisqualified: true });
     if (existing) upsertLastSeenDisplayName(interaction.user.id, displayName);
 
     if (interaction.isChatInputCommand()) {
@@ -1541,7 +1768,53 @@ async function handleInteractionCreate(interaction) {
             `Email: ${maskEmail(email)}`,
             `Phone: ${maskPhone(phone)}`,
             `Discord: ${p.discord_display_name_last_seen || p.discord_display_name_at_signup || interaction.user.username}`,
+            `Tekken 8 ID: ${p.tekken8_id || '(not set)'}`,
+            `Wavu linked: ${Number(p.wavu_linked || 0) ? 'yes' : 'no'}`,
+            `Last Wavu sync: ${p.last_wavu_sync_at || '(never)'}`,
           ].join('\n'),
+        });
+        return;
+      }
+
+
+      if (name === 'settekkenid') {
+        const p = ensureSignedUp(interaction);
+        if (!p) {
+          await interaction.reply({ content: 'You are not signed up yet. Use /signup first.', ephemeral: true });
+          return;
+        }
+
+        if (isTekkenIdChangeOnCooldown(p)) {
+          await interaction.reply({ content: `You can change your Tekken ID again in ${formatCooldownRemaining(p)}.`, ephemeral: true });
+          return;
+        }
+
+        const tekken8Id = normalizeTekken8Id(interaction.options.getString('t8_id', true));
+        if (!isValidTekken8Id(tekken8Id)) {
+          await interaction.reply({ content: 'Invalid Tekken 8 ID format. Use XXXX-XXXX-XXXX.', ephemeral: true });
+          return;
+        }
+
+        const owner = getTekkenIdOwner(tekken8Id);
+        if (owner && owner.discord_user_id !== interaction.user.id) {
+          await interaction.reply({ content: 'This Tekken 8 ID is already linked to another player. Ask an admin to override if needed.', ephemeral: true });
+          return;
+        }
+
+        db.prepare(`
+          UPDATE players
+          SET tekken8_id = ?, tekken_id_updated_at = datetime('now')
+          WHERE league_id = 1 AND discord_user_id = ?
+        `).run(tekken8Id, interaction.user.id);
+
+        logAudit('set_tekken8_id', interaction.user.id, { tekken8Id, via: 'self' });
+
+        const syncResult = await syncPlayerWavuData(db, interaction.user.id, { leagueId: 1, wavuApi });
+        await interaction.reply({
+          content: syncResult.ok
+            ? 'Tekken 8 ID successfully linked. Ranked data will now be pulled from Wavu Wank for Power Player Rankings.'
+            : 'Tekken ID saved, but no Wavu data was found yet. Make sure the ID is correct and that you have played ranked recently.',
+          ephemeral: true,
         });
         return;
       }
@@ -1675,6 +1948,14 @@ async function handleInteractionCreate(interaction) {
         return;
       }
 
+      if (name === 'power_rankings') {
+        await syncAllLinkedPlayersWavuData(db, { leagueId: 1, wavuApi }).catch(() => null);
+  const rankings = recalculateAndStorePowerRankings(db, 1);
+        const pages = buildPowerRankingsTablePages(rankings, { pageSize: 20, includeTimestamp: true });
+        await interaction.reply({ content: pages[0], ephemeral: false });
+        return;
+      }
+
       if (name === 'table') {
         let pages;
         try {
@@ -1748,8 +2029,9 @@ ${lines.join('\n')}`, ephemeral: false });
             '• /left — see who you still need to play and remaining matches',
             '• /standings or /table — view live standings table anytime',
             '• /matches — view recent match IDs and statuses',
+            '• /settekkenid — link your Tekken 8 ID for Wavu ranked sync',
             '• /mydata — view your private stored profile details',
-            'Admins: /adminhelp, /points, /admin_vs, /bot_settings, /admin_status, /admin_player_matches, /admin_player_left, /admin_tournament_settings, /admin_setup_tournament, /admin_generate_fixtures, /admin_force_result, /admin_void_match, /admin_dispute_match, /admin_dq_player, /admin_rename_player, /admin_allowance_player, /admin_reset, /admin_reset_confirm, /admin_reset_league',
+            'Admins: /adminhelp, /points, /admin_vs, /bot_settings, /admin_status, /admin_player_matches, /admin_player_left, /admin_export_counted_matches, /admin_refresh_power_rankings, /admin_generate_power_seeds, /settekkenid_admin, /removetekkenid, /admin_sync_wavu, /admin_sync_wavu_player, /admin_tournament_settings, /admin_setup_tournament, /admin_generate_fixtures, /admin_force_result, /admin_void_match, /admin_dispute_match, /admin_dq_player, /admin_rename_player, /admin_allowance_player, /admin_reset, /admin_reset_confirm, /admin_reset_league',
           ].join('\n'),
         });
         return;
@@ -1767,6 +2049,7 @@ ${lines.join('\n')}`, ephemeral: false });
             '5) Use `/queue` to see who is currently available.',
             '6) Use `/left` to see opponents and remaining matches sorted by priority.',
             '7) Use `/mydata` to view your saved profile (private).',
+            '8) Use `/settekkenid` to link Tekken 8 ID for ranked sync via Wavu.',
             'Tip: `/playerhelp` is an alias if `/helpplayer` is hard to find.',
           ].join('\n'),
         });
@@ -1786,6 +2069,12 @@ ${lines.join('\n')}`, ephemeral: false });
             '• /admin_generate_fixtures — generate missing round-robin fixtures.',
             '• /admin_player_matches — inspect one player match list.',
             '• /admin_player_left — inspect one player remaining opponents.',
+            '• /admin_export_counted_matches — export table-counted non-voided matches as CSV.',
+            '• /admin_refresh_power_rankings — recalc and refresh persistent power ranking table.',
+            '• /admin_generate_power_seeds — generate seeds with DQ restrictions applied.',
+            '• /settekkenid_admin — set/correct a player Tekken 8 ID.',
+            '• /removetekkenid — remove a player Tekken 8 ID link.',
+            '• /admin_sync_wavu and /admin_sync_wavu_player — force Wavu ranked data sync.',
             '• /admin_tournament_settings — view current tournament setup + points.',
             '• /admin_setup_tournament — update setup fields (days, slots, show%).',
             '• /points — set points for win, loss, no-show, and 3-0 sweep bonus.',
@@ -1904,6 +2193,7 @@ ${lines.join('\n')}`, ephemeral: false });
               `standingsChannelId: ${gs.standings_channel_id || '(not set)'}`,
               `disputeChannelId: ${gs.dispute_channel_id || '(not set)'}`,
               `activityChannelId: ${gs.activity_channel_id || '(not set)'}`,
+              `powerRankingsChannelId: ${gs.power_rankings_channel_id || '(not set)'}`,
               `matchFormat: ${gs.match_format}`,
               `allowPublicPlayerCommands: ${gs.allow_public_player_commands ? 'true' : 'false'}`,
               `tournamentName: ${gs.tournament_name}`,
@@ -1947,6 +2237,7 @@ ${lines.join('\n')}`, ephemeral: false });
         if (sub === 'set_standings_channel') patch.standings_channel_id = interaction.options.getChannel('channel', true).id;
         if (sub === 'set_dispute_channel') patch.dispute_channel_id = interaction.options.getChannel('channel', true).id;
         if (sub === 'set_activity_channel') patch.activity_channel_id = interaction.options.getChannel('channel', true).id;
+        if (sub === 'set_power_rankings_channel') patch.power_rankings_channel_id = interaction.options.getChannel('channel', true).id;
         if (sub === 'set_diagnostics') patch.enable_diagnostics = interaction.options.getBoolean('enabled', true) ? 1 : 0;
         if (sub === 'set_allow_public_player_commands') patch.allow_public_player_commands = interaction.options.getBoolean('enabled', true) ? 1 : 0;
         if (sub === 'set_cleanup_policy') {
@@ -2041,6 +2332,167 @@ ${lines.join('\n')}`, ephemeral: false });
         }
 
         await interaction.reply({ content: buildLeftToPlayMessage(target.id), ephemeral: true });
+        return;
+      }
+
+      if (name === 'admin_export_counted_matches') {
+        if (!isAdmin(interaction)) {
+          await interaction.reply({ content: 'Admin only.', ephemeral: true });
+          return;
+        }
+
+        const { rowCount, csv } = buildCountedMatchesCsv();
+        const timestamp = new Date().toISOString().replace(/[.:]/g, '-');
+        const fileName = `counted-matches-${timestamp}.csv`;
+
+        const attachment = new AttachmentBuilder(Buffer.from(csv, 'utf8'), { name: fileName });
+
+        await interaction.reply({
+          content: `Exported ${rowCount} table-counted match(es) (voided matches excluded).`,
+          files: [attachment],
+          ephemeral: true,
+        });
+        return;
+      }
+
+
+
+      if (name === 'admin_refresh_power_rankings') {
+        if (!isAdmin(interaction)) {
+          await interaction.reply({ content: 'Admin only.', ephemeral: true });
+          return;
+        }
+
+        const outcome = await refreshPowerRankingMessagesForGuild(interaction.guild, { force: true });
+        await interaction.reply({
+          content: `Power rankings refresh complete. Updated=${outcome.updated ? 'yes' : 'no'} reason=${outcome.reason} players=${outcome.rankingsCount || 0}.`,
+          ephemeral: true,
+        });
+        return;
+      }
+
+      if (name === 'admin_generate_power_seeds') {
+        if (!isAdmin(interaction)) {
+          await interaction.reply({ content: 'Admin only.', ephemeral: true });
+          return;
+        }
+
+        const entrants = interaction.options.getInteger('entrants');
+        await syncAllLinkedPlayersWavuData(db, { leagueId: 1, wavuApi }).catch(() => null);
+  const rankings = recalculateAndStorePowerRankings(db, 1);
+        const seeds = generateSeedsFromPowerRankings(rankings, entrants || null);
+        if (!seeds.length) {
+          await interaction.reply({ content: 'No players available to seed.', ephemeral: true });
+          return;
+        }
+
+        const lines = seeds.map((s, idx) => `${idx + 1}. ${s.tekken_tag || s.discord_user_id}${s.seeding_asterisk ? '*' : ''} (<@${s.discord_user_id}>) | rating=${Number(s.power_player_rating || 0).toFixed(1)} | dq=${s.dq_count} | rule=${s.seeding_restriction}`);
+        await interaction.reply({ content: `**Power Seeds (${seeds.length})**\n${lines.join('\n')}`, ephemeral: true });
+        return;
+      }
+
+
+      if (name === 'settekkenid_admin') {
+        if (!isAdmin(interaction)) {
+          await interaction.reply({ content: 'Admin only.', ephemeral: true });
+          return;
+        }
+
+        const target = interaction.options.getUser('player', true);
+        const tekken8Id = normalizeTekken8Id(interaction.options.getString('t8_id', true));
+        if (!isValidTekken8Id(tekken8Id)) {
+          await interaction.reply({ content: 'Invalid Tekken 8 ID format. Use XXXX-XXXX-XXXX.', ephemeral: true });
+          return;
+        }
+
+        const targetPlayer = getPlayer(target.id, { includeDisqualified: true });
+        if (!targetPlayer) {
+          await interaction.reply({ content: 'That user is not signed up in the league.', ephemeral: true });
+          return;
+        }
+
+        db.prepare(`
+          UPDATE players
+          SET tekken8_id = ?, tekken_id_updated_at = datetime('now')
+          WHERE league_id = 1 AND discord_user_id = ?
+        `).run(tekken8Id, target.id);
+
+        const syncResult = await syncPlayerWavuData(db, target.id, { leagueId: 1, wavuApi });
+        logAudit('set_tekken8_id', interaction.user.id, { targetUserId: target.id, tekken8Id, via: 'admin', syncOk: !!syncResult.ok });
+
+        await interaction.reply({
+          content: syncResult.ok
+            ? `Tekken 8 ID set for <@${target.id}> and Wavu sync succeeded.`
+            : `Tekken 8 ID set for <@${target.id}> but Wavu data is currently unavailable.`,
+          ephemeral: true,
+        });
+        return;
+      }
+
+      if (name === 'removetekkenid') {
+        if (!isAdmin(interaction)) {
+          await interaction.reply({ content: 'Admin only.', ephemeral: true });
+          return;
+        }
+
+        const target = interaction.options.getUser('player', true);
+        const targetPlayer = getPlayer(target.id, { includeDisqualified: true });
+        if (!targetPlayer) {
+          await interaction.reply({ content: 'That user is not signed up in the league.', ephemeral: true });
+          return;
+        }
+
+        db.prepare(`
+          UPDATE players
+          SET tekken8_id = NULL,
+              wavu_player_id = NULL,
+              tekken_name = NULL,
+              tekken_platform = NULL,
+              last_wavu_sync_at = NULL,
+              ranked_source = 'unavailable',
+              wavu_linked = 0,
+              tekken_id_updated_at = datetime('now')
+          WHERE league_id = 1 AND discord_user_id = ?
+        `).run(target.id);
+
+        logAudit('remove_tekken8_id', interaction.user.id, { targetUserId: target.id });
+        await interaction.reply({ content: `Removed Tekken 8 ID for <@${target.id}>.`, ephemeral: true });
+        return;
+      }
+
+      if (name === 'admin_sync_wavu') {
+        if (!isAdmin(interaction)) {
+          await interaction.reply({ content: 'Admin only.', ephemeral: true });
+          return;
+        }
+
+        const result = await syncAllLinkedPlayersWavuData(db, { leagueId: 1, wavuApi });
+        logAudit('admin_sync_wavu', interaction.user.id, { changed: result.changed, total: result.total });
+        await interaction.reply({ content: `Wavu sync complete. Synced ${result.changed}/${result.total} players.`, ephemeral: true });
+        return;
+      }
+
+      if (name === 'admin_sync_wavu_player') {
+        if (!isAdmin(interaction)) {
+          await interaction.reply({ content: 'Admin only.', ephemeral: true });
+          return;
+        }
+
+        const target = interaction.options.getUser('player', true);
+        const targetPlayer = getPlayer(target.id, { includeDisqualified: true });
+        if (!targetPlayer) {
+          await interaction.reply({ content: 'That user is not signed up in the league.', ephemeral: true });
+          return;
+        }
+
+        const result = await syncPlayerWavuData(db, target.id, { leagueId: 1, wavuApi });
+        logAudit('admin_sync_wavu_player', interaction.user.id, { targetUserId: target.id, ok: !!result.ok, reason: result.reason });
+        await interaction.reply({
+          content: result.ok
+            ? `Wavu sync succeeded for <@${target.id}>.`
+            : `Wavu sync failed for <@${target.id}> (${result.reason || 'unavailable'}).`,
+          ephemeral: true,
+        });
         return;
       }
 
@@ -2407,7 +2859,7 @@ ${buildTournamentSettingsMessage()}`,
         }
 
         const tx = db.transaction(() => {
-          db.prepare("UPDATE players SET status = 'disqualified' WHERE league_id = 1 AND discord_user_id = ?").run(target.id);
+          db.prepare("UPDATE players SET status = 'disqualified', dq_count = COALESCE(dq_count, 0) + 1 WHERE league_id = 1 AND discord_user_id = ?").run(target.id);
           db.prepare('DELETE FROM attendance WHERE league_id = 1 AND discord_user_id = ?').run(target.id);
           db.prepare('DELETE FROM ready_queue WHERE league_id = 1 AND discord_user_id = ?').run(target.id);
           db.prepare("UPDATE matches SET state = 'cancelled', ended_at = datetime('now') WHERE league_id = 1 AND (player_a_discord_id = ? OR player_b_discord_id = ?) AND state IN ('pending','reported','active','disputed')").run(target.id, target.id);
@@ -2461,7 +2913,7 @@ ${buildTournamentSettingsMessage()}`,
 
         const displayName = getDisplayNameFromInteraction(interaction);
 
-        const existing = getPlayer(interaction.user.id);
+        const existing = getPlayer(interaction.user.id, { includeDisqualified: true });
         const isNewSignup = !existing;
         if (isNewSignup) {
           db.prepare(`
@@ -2553,6 +3005,7 @@ function shutdown(signal) {
   console.log(`${signal} received, shutting down gracefully...`);
   try {
     if (matchmakerTimer) clearInterval(matchmakerTimer);
+    if (dailyPowerRefreshTimer) clearInterval(dailyPowerRefreshTimer);
     db.close();
   } catch (err) {
     console.error('Failed to close database cleanly:', err);

@@ -75,12 +75,33 @@ test('initDb adds configurable points columns and admin override control columns
 });
 
 
-test('initDb adds player allowance bonus column', () => {
+test('initDb adds player allowance bonus and power ranking columns', () => {
   const db = new Database(':memory:');
   initDb(db);
 
   const playerCols = db.prepare("PRAGMA table_info(players)").all().map((c) => c.name);
   assert.equal(playerCols.includes('allowance_bonus_days'), true);
+  assert.equal(playerCols.includes('dq_count'), true);
+  assert.equal(playerCols.includes('power_player_rating'), true);
+  assert.equal(playerCols.includes('league_strength_score'), true);
+  assert.equal(playerCols.includes('ranked_strength_score'), true);
+  assert.equal(playerCols.includes('activity_momentum_score'), true);
+  assert.equal(playerCols.includes('reliability_index_score'), true);
+  assert.equal(playerCols.includes('seeding_restriction'), true);
+  assert.equal(playerCols.includes('seeding_asterisk'), true);
+
+  assert.equal(playerCols.includes('tekken8_id'), true);
+  assert.equal(playerCols.includes('wavu_player_id'), true);
+  assert.equal(playerCols.includes('tekken_name'), true);
+  assert.equal(playerCols.includes('tekken_platform'), true);
+  assert.equal(playerCols.includes('last_wavu_sync_at'), true);
+  assert.equal(playerCols.includes('ranked_source'), true);
+  assert.equal(playerCols.includes('wavu_linked'), true);
+
+  const guildCols = db.prepare("PRAGMA table_info(guild_settings)").all().map((c) => c.name);
+  assert.equal(guildCols.includes('power_rankings_channel_id'), true);
+  assert.equal(guildCols.includes('power_rankings_message_ids_json'), true);
+  assert.equal(guildCols.includes('power_rankings_last_hash'), true);
 
   db.close();
 });

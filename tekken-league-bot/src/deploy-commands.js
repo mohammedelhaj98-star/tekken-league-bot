@@ -41,6 +41,15 @@ const commands = [
     .setDescription('View the personal data you submitted (private)'),
 
   new SlashCommandBuilder()
+    .setName('settekkenid')
+    .setDescription('Set your Tekken 8 in-game ID for Wavu ranked sync')
+    .addStringOption(o => o
+      .setName('t8_id')
+      .setDescription('Tekken 8 ID, e.g. 1234-5678-ABCD')
+      .setRequired(true)
+      .setMaxLength(14)),
+
+  new SlashCommandBuilder()
     .setName('checkin')
     .setDescription('Mark yourself available for today (counts toward 15/20)'),
 
@@ -55,6 +64,10 @@ const commands = [
   new SlashCommandBuilder()
     .setName('standings')
     .setDescription('Show current league standings'),
+
+  new SlashCommandBuilder()
+    .setName('power_rankings')
+    .setDescription('Show Power Player Rankings used for long-term seeding'),
 
   new SlashCommandBuilder()
     .setName('table')
@@ -120,6 +133,10 @@ const commands = [
       .setDescription('Set channel for signup/checkin/ready activity notifications')
       .addChannelOption(o => o.setName('channel').setDescription('Activity channel').setRequired(true)))
     .addSubcommand(sc => sc
+      .setName('set_power_rankings_channel')
+      .setDescription('Set channel for the persistent Power Rankings table')
+      .addChannelOption(o => o.setName('channel').setDescription('Power rankings channel').setRequired(true)))
+    .addSubcommand(sc => sc
       .setName('set_cleanup_policy')
       .setDescription('Set message cleanup policy')
       .addStringOption(o => o.setName('policy').setDescription('Policy').setRequired(true).addChoices(
@@ -173,7 +190,52 @@ const commands = [
     .addUserOption(o => o
       .setName('player')
       .setDescription('Player to inspect')
-      .setRequired(true))
+    .setRequired(true))
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
+  new SlashCommandBuilder()
+    .setName('admin_export_counted_matches')
+    .setDescription('Admin: export all table-counted (non-voided) matches as CSV')
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
+  new SlashCommandBuilder()
+    .setName('admin_refresh_power_rankings')
+    .setDescription('Admin: force recalculation and refresh persistent Power Rankings table')
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
+  new SlashCommandBuilder()
+    .setName('admin_generate_power_seeds')
+    .setDescription('Admin: generate seeding order from Power Player Rankings with DQ rules')
+    .addIntegerOption(o => o
+      .setName('entrants')
+      .setDescription('Optional entrant cap (top N by power rating)')
+      .setRequired(false)
+      .setMinValue(2)
+      .setMaxValue(1024))
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
+  new SlashCommandBuilder()
+    .setName('settekkenid_admin')
+    .setDescription('Admin: set Tekken 8 ID for a player')
+    .addUserOption(o => o.setName('player').setDescription('Player to update').setRequired(true))
+    .addStringOption(o => o.setName('t8_id').setDescription('Tekken 8 ID').setRequired(true).setMaxLength(14))
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
+  new SlashCommandBuilder()
+    .setName('removetekkenid')
+    .setDescription('Admin: remove stored Tekken 8 ID for a player')
+    .addUserOption(o => o.setName('player').setDescription('Player to update').setRequired(true))
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
+  new SlashCommandBuilder()
+    .setName('admin_sync_wavu')
+    .setDescription('Admin: force Wavu sync for all linked players')
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
+  new SlashCommandBuilder()
+    .setName('admin_sync_wavu_player')
+    .setDescription('Admin: force Wavu sync for one player')
+    .addUserOption(o => o.setName('player').setDescription('Player to sync').setRequired(true))
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 
   new SlashCommandBuilder()
