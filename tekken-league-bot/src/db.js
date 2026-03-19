@@ -47,6 +47,14 @@ function initDb(db) {
       tekken_tag TEXT NOT NULL,
       email_enc TEXT NOT NULL,
       phone_enc TEXT NOT NULL,
+      tekken8_id TEXT,
+      wavu_player_id TEXT,
+      tekken_name TEXT,
+      tekken_platform TEXT,
+      last_wavu_sync_at TEXT,
+      tekken_id_updated_at TEXT,
+      ranked_source TEXT NOT NULL DEFAULT 'unavailable',
+      wavu_linked INTEGER NOT NULL DEFAULT 0,
       status TEXT NOT NULL DEFAULT 'active',
       allowance_bonus_days INTEGER NOT NULL DEFAULT 0,
       dq_count INTEGER NOT NULL DEFAULT 0,
@@ -258,6 +266,14 @@ function initDb(db) {
   ensureColumn('guild_settings', 'dispute_channel_id', 'dispute_channel_id TEXT');
   ensureColumn('guild_settings', 'activity_channel_id', 'activity_channel_id TEXT');
   ensureColumn('players', 'allowance_bonus_days', 'allowance_bonus_days INTEGER NOT NULL DEFAULT 0');
+  ensureColumn('players', 'tekken8_id', 'tekken8_id TEXT');
+  ensureColumn('players', 'wavu_player_id', 'wavu_player_id TEXT');
+  ensureColumn('players', 'tekken_name', 'tekken_name TEXT');
+  ensureColumn('players', 'tekken_platform', 'tekken_platform TEXT');
+  ensureColumn('players', 'last_wavu_sync_at', 'last_wavu_sync_at TEXT');
+  ensureColumn('players', 'tekken_id_updated_at', 'tekken_id_updated_at TEXT');
+  ensureColumn('players', 'ranked_source', "ranked_source TEXT NOT NULL DEFAULT 'unavailable'");
+  ensureColumn('players', 'wavu_linked', 'wavu_linked INTEGER NOT NULL DEFAULT 0');
   ensureColumn('players', 'dq_count', 'dq_count INTEGER NOT NULL DEFAULT 0');
   ensureColumn('players', 'ranked_tier_score', 'ranked_tier_score REAL NOT NULL DEFAULT 50');
   ensureColumn('players', 'ranked_recent_win_rate', 'ranked_recent_win_rate REAL NOT NULL DEFAULT 50');

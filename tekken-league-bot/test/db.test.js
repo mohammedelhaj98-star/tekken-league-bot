@@ -90,6 +90,14 @@ test('initDb adds player allowance bonus and power ranking columns', () => {
   assert.equal(playerCols.includes('seeding_restriction'), true);
   assert.equal(playerCols.includes('seeding_asterisk'), true);
 
+  assert.equal(playerCols.includes('tekken8_id'), true);
+  assert.equal(playerCols.includes('wavu_player_id'), true);
+  assert.equal(playerCols.includes('tekken_name'), true);
+  assert.equal(playerCols.includes('tekken_platform'), true);
+  assert.equal(playerCols.includes('last_wavu_sync_at'), true);
+  assert.equal(playerCols.includes('ranked_source'), true);
+  assert.equal(playerCols.includes('wavu_linked'), true);
+
   const guildCols = db.prepare("PRAGMA table_info(guild_settings)").all().map((c) => c.name);
   assert.equal(guildCols.includes('power_rankings_channel_id'), true);
   assert.equal(guildCols.includes('power_rankings_message_ids_json'), true);

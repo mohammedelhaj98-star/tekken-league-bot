@@ -29,7 +29,10 @@ function getPlayerBaseRows(db, leagueId = 1) {
       ranked_tier_score,
       ranked_recent_win_rate,
       ranked_recent_matches,
-      ranked_recent_activity
+      ranked_recent_activity,
+      ranked_source,
+      wavu_linked,
+      last_wavu_sync_at
     FROM players
     WHERE league_id = ?
   `).all(leagueId);
@@ -243,7 +246,11 @@ function getPowerRankings(db, leagueId = 1) {
       reliability_index_score,
       power_player_rating,
       seeding_restriction,
-      seeding_asterisk
+      seeding_asterisk,
+      ranked_source,
+      wavu_linked,
+      last_wavu_sync_at,
+      tekken8_id
     FROM players
     WHERE league_id = ?
     ORDER BY power_player_rating DESC, reliability_index_score DESC, tekken_tag ASC
@@ -299,6 +306,11 @@ function buildPowerRankingsTablePages(rankings, { pageSize = 20, includeTimestam
   for (let page = 1; page <= totalPages; page += 1) {
     const start = (page - 1) * pageSize;
     const chunk = rows.slice(start, start + pageSize);
+    const latestWavuSync = rankings
+      .map((r) => r.last_wavu_sync_at)
+      .filter(Boolean)
+      .sort()
+      .slice(-1)[0] || '(none)';
     const ts = includeTimestamp ? `\nLast Updated: ${new Date().toISOString()}` : '';
     pages.push([
       `**Power Player Rankings** (page ${page}/${totalPages})`,
@@ -307,6 +319,7 @@ function buildPowerRankingsTablePages(rankings, { pageSize = 20, includeTimestam
       ...chunk,
       '```',
       '*DQ>=3 marked with `*`; DQ restrictions apply for tournament seeding.*',
+      `Ranked source: Wavu • Latest Wavu sync: ${latestWavuSync}`,
       ts,
     ].join('\n'));
   }
