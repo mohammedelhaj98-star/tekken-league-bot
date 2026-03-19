@@ -41,6 +41,15 @@ const commands = [
     .setDescription('View the personal data you submitted (private)'),
 
   new SlashCommandBuilder()
+    .setName('settekkenid')
+    .setDescription('Set your Tekken 8 in-game ID for Wavu ranked sync')
+    .addStringOption(o => o
+      .setName('t8_id')
+      .setDescription('Tekken 8 ID, e.g. 1234-5678-ABCD')
+      .setRequired(true)
+      .setMaxLength(14)),
+
+  new SlashCommandBuilder()
     .setName('checkin')
     .setDescription('Mark yourself available for today (counts toward 15/20)'),
 
@@ -203,6 +212,30 @@ const commands = [
       .setRequired(false)
       .setMinValue(2)
       .setMaxValue(1024))
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
+  new SlashCommandBuilder()
+    .setName('settekkenid_admin')
+    .setDescription('Admin: set Tekken 8 ID for a player')
+    .addUserOption(o => o.setName('player').setDescription('Player to update').setRequired(true))
+    .addStringOption(o => o.setName('t8_id').setDescription('Tekken 8 ID').setRequired(true).setMaxLength(14))
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
+  new SlashCommandBuilder()
+    .setName('removetekkenid')
+    .setDescription('Admin: remove stored Tekken 8 ID for a player')
+    .addUserOption(o => o.setName('player').setDescription('Player to update').setRequired(true))
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
+  new SlashCommandBuilder()
+    .setName('admin_sync_wavu')
+    .setDescription('Admin: force Wavu sync for all linked players')
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
+  new SlashCommandBuilder()
+    .setName('admin_sync_wavu_player')
+    .setDescription('Admin: force Wavu sync for one player')
+    .addUserOption(o => o.setName('player').setDescription('Player to sync').setRequired(true))
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 
   new SlashCommandBuilder()
