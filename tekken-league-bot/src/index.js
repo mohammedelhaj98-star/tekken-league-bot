@@ -212,6 +212,10 @@ function getPlayer(discord_user_id, { includeDisqualified = false } = {}) {
   `).get(discord_user_id);
 }
 
+function isDisqualifiedStatus(status) {
+  return status === 'disqualified' || status === 'disqualified_remaining';
+}
+
 
 function ensureSignedUp(interaction) {
   const p = getPlayer(interaction.user.id);

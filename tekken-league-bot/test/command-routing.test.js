@@ -48,6 +48,16 @@ test('index.js keeps exactly one primary discord event wiring for key handlers',
   assert.equal(reactionRemoveCount, 1, 'Expected exactly one MessageReactionRemove handler.');
 });
 
+
+test('index.js defines the disqualification status helper used by standings and admin flows', () => {
+  const indexText = fs.readFileSync('src/index.js', 'utf8');
+  assert.match(
+    indexText,
+    /function isDisqualifiedStatus\(status\) \{\s*return status === 'disqualified' \|\| status === 'disqualified_remaining';\s*\}/,
+    'Expected index.js to define isDisqualifiedStatus for standings/admin logic.',
+  );
+});
+
 test('interaction handler is explicitly async (await-safe)', () => {
   const indexText = fs.readFileSync('src/index.js', 'utf8');
   const asyncInteractionHandler = /client\.on\(Events\.InteractionCreate,\s*async\s*\(interaction\)\s*=>\s*\{/g;
