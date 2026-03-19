@@ -2119,7 +2119,7 @@ ${lines.join('\n')}`, ephemeral: false });
 
         logAudit('admin_points_update', interaction.user.id, rules);
         await interaction.reply({
-          content: `Points updated: win=${rules.points_win}, loss=${rules.points_loss}, no-show=${rules.points_no_show}, 3-0 sweep bonus=${rules.points_sweep_bonus}.`,
+          content: `Points updated: win=${rules.points_win}, loss=${rules.points_loss}, no-show=${rules.points_no_show}, 3-0 sweep bonus=${rules.points_sweep_bonus}. Standings and /table recalculate retroactively from all confirmed results.`,
           ephemeral: true,
         });
         return;

@@ -189,6 +189,16 @@ function computeStandings(db, league_id = 1) {
     const aIsDq = dqIds.has(fixture.player_a_discord_id);
     const bIsDq = dqIds.has(fixture.player_b_discord_id);
 
+    // If both sides are league-disqualified, count the fixture as a 0-3 forfeit loss for both
+    // so their played totals still reflect the full schedule.
+    if (aIsDq && bIsDq) {
+      A.games_lost += 3;
+      B.games_lost += 3;
+      A.losses += 1;
+      B.losses += 1;
+      continue;
+    }
+
     // If one side is DQ, that side always loses 0-3.
     if (aIsDq !== bIsDq) {
       const winnerId = aIsDq ? fixture.player_b_discord_id : fixture.player_a_discord_id;
