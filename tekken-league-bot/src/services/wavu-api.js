@@ -139,7 +139,7 @@ class WavuApiService {
       }
     }
 
-    const failResult = {
+    return {
       ok: false,
       linked: false,
       notFound: !!lastError?.notFound,
@@ -147,8 +147,6 @@ class WavuApiService {
       timeout: !!lastError?.timeout,
       error: lastError?.error || null,
     };
-    this.setCached(cacheKey, failResult);
-    return failResult;
   }
 }
 
