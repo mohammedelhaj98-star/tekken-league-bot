@@ -36,6 +36,47 @@ test('WavuApiService lookup normalizes payload from endpoint', async () => {
   assert.equal(result.value.rankedRecentActivity > 0, true);
 });
 
+
+test('WavuApiService does not cache transient lookup failures', async () => {
+  let callCount = 0;
+  const fetchFn = async (url) => {
+    callCount += 1;
+    if (callCount <= 6) {
+      return {
+        ok: false,
+        status: 429,
+        text: async () => JSON.stringify({ error: 'rate limited' }),
+      };
+    }
+
+    return {
+      ok: url.includes('/api/player/'),
+      status: url.includes('/api/player/') ? 200 : 404,
+      text: async () => JSON.stringify({
+        player: {
+          id: 'wavu-3',
+          name: 'Recovered',
+          platform: 'PC',
+          rank_tier: 72,
+          recent_win_rate: 58,
+          recent_matches: 18,
+        },
+      }),
+    };
+  };
+
+  const svc = new WavuApiService({ fetchFn, cacheTtlMs: 60_000 });
+
+  const first = await svc.lookupByTekken8Id('1234-5678-WAVU');
+  assert.equal(first.ok, false);
+  assert.equal(first.rateLimited, true);
+
+  const second = await svc.lookupByTekken8Id('1234-5678-WAVU');
+  assert.equal(second.ok, true);
+  assert.equal(second.value.wavuPlayerId, 'wavu-3');
+  assert.equal(callCount > 6, true);
+});
+
 test('syncPlayerWavuData updates player ranked fields from Wavu data', async () => {
   const db = new Database(':memory:');
   initDb(db);
